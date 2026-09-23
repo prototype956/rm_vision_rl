@@ -1,3 +1,21 @@
 {
-    "cmake.sourceDirectory": "/home/nuc/Workspace/rm_vision_rl/tools/phase1"
+  "cmake.sourceDirectory": "${workspaceFolder}/native/vision_bridge",
+  "cmake.buildDirectory": "${workspaceFolder}/artifacts/build/vision-bridge",
+  "cmake.configureSettings": {
+    "VISION_ROOT": "${workspaceFolder}/../rm_vision_2027",
+    "CMAKE_EXPORT_COMPILE_COMMANDS": true
+  },
+  "clangd.path": "clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--clang-tidy",
+    "--completion-style=detailed"
+  ],
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "[cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+  },
+  "[c]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+  }
 }

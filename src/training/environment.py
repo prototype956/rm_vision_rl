@@ -1,19 +1,19 @@
-"""Fixed reset configuration for training, including SB3 automatic episode resets."""
+"""固定训练场景配置，使 SB3 自动重置回合时仍使用相同场景。"""
 import copy
 
 import gymnasium as gym
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from rmvision_rl.environment.static_fire import StaticFireEnv
-from rmvision_rl.training.config import ENV_PATHS
+from src.environment.static_fire import StaticFireEnv
+from src.training.config import ENV_PATHS
 
 
 class FixedScenario(gym.Wrapper):
-    """Scene randomness is independent of the learner seed; every reset repeats this scene.
+    """使用独立于模型的场景种子，每次重置重复相同场景。
 
-    This deliberately repeats measurement noise too. It is a simple learning fixture,
-    not a claim of generalization. The base Gym environment keeps its original seed API.
+    测量噪声也会重复，适合验证基础学习流程，不能据此判断泛化能力。
+    底层 Gym 环境仍保留原有的 seed 接口。
     """
 
     def __init__(self, env, scene_seed, scenario):
@@ -31,9 +31,11 @@ class FixedScenario(gym.Wrapper):
 
 
 def make_environment(config, log_dir, monitor_file=None):
-    """Create an unstarted fixed-scene env; each instance owns its simulator pair."""
+    """创建尚未启动的固定场景环境，每个实例独占一对仿真与视觉桥接进程。"""
     settings = config["environment"]
     kwargs = {key: settings[key] for key in ENV_PATHS if key in settings}
+    if "decision_clock" in settings:
+        kwargs["decision_clock"] = settings["decision_clock"]
     base = StaticFireEnv(episode_steps=settings["episode_steps"], log_dir=log_dir, **kwargs)
     env = FixedScenario(base, settings["scene_seed"], settings["scenario"])
     return Monitor(env, filename=str(monitor_file) if monitor_file else None,
@@ -41,6 +43,6 @@ def make_environment(config, log_dir, monitor_file=None):
 
 
 def vectorize(env):
-    # DummyVecEnv supplies terminal_observation and TimeLimit.truncated before auto-reset.
-    # MaskablePPO performs the timeout bootstrap; this layer must not add another reward.
+    # DummyVecEnv 在自动重置前提供 terminal_observation 和 TimeLimit.truncated。
+    # 时间截断的价值自举由 MaskablePPO 执行，此处不能重复追加奖励。
     return DummyVecEnv([lambda: env])

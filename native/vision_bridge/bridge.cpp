@@ -19,7 +19,7 @@ using Json = nlohmann::json;
 namespace {
 using namespace mv;
 constexpr std::uint64_t EPOCH = 1'000'000'000'000'000'000ULL;
-// Unwind an unsubmitted policy cycle without completing MPC or publishing a command.
+// 退出未提交的策略周期，不继续计算 MPC 或发布命令。
 struct PolicyCancelled {};
 auto Time(std::uint64_t ns) {
   return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
@@ -70,17 +70,27 @@ hal::GimbalActuatorTelemetry Feedback(const Json& value) {
   return result;
 }
 
-/** @brief One synchronous estimator/control owner; inputs contain detector frames and self feedback
- * only. */
+/**
+ * @brief 同步管理估计器与控制器，输入仅包含检测帧和自身反馈等控制数据。
+ *
+ * 每次控制计算生成待确认结果，由调用方提交给仿真后通过 ack 确认发布。
+ * 策略回调可在同一次计算内等待 Python 动作，等待期间不推进仿真。
+ */
 class Bridge {
  public:
   explicit Bridge(const std::string& root, std::ostream* diagnostics = nullptr)
       : root_(root), diagnostics_(diagnostics) {}
+  /** @brief 丢弃未提交周期并使控制器失效，后续请求必须先 Reset。 */
   void Discard() {
     pending_.reset();
-    control_.reset();  // The next operation must Reset; no partially updated cycle is reusable.
+    control_.reset();  // 部分更新的周期不可复用，下次必须 Reset。
     training_ = false;
   }
+  /**
+   * @brief 处理一个 JSONL 请求，维护回合、控制周期和命令确认状态。
+   * @param request 已解析的请求对象，op 指定操作类型。
+   * @return 操作结果；外部策略模式可能先通过标准输出发送观测并等待动作。
+   */
   Json Handle(const Json& request) {
     const std::string op = request.at("op");
     if (op == "reset") {
@@ -269,7 +279,7 @@ class Bridge {
                              {"metadata",
                               {{"track_generation", snapshot.prediction.track_generation},
                                {"source_sequence", snapshot.prediction.sequence}}}};
-            // Pause inside the shared callback: no second Step, no re-fusion or duplicate MPC.
+            // 在当前回调内暂停，恢复时不再次调用 Step，避免重复融合或求解 MPC。
             std::cout << Json({{"ok", true},
                                {"kind", "policy_observation"},
                                {"token", token},
@@ -299,7 +309,7 @@ class Bridge {
             return modules::PolicyDecision{index};
           });
       if (policy_record.is_null()) {
-        // Shared preconditions skipped the callback; do not preserve a stale rule-only selector.
+        // 前置条件不满足时跳过回调，清空旧的规则选板状态。
         fire_only_ = std::make_unique<modules::FireOnlyPolicyAdapter>(
             modules::ParseFireControlConfig(Load("fire_control")));
       }
@@ -308,21 +318,21 @@ class Bridge {
     }
     auto& output = pending_->output;
     const bool raw_fire = output.command.fire;
-    // A missing target has no policy callback. Reuse the self-feedback sweep only for full LOST;
-    // an external WAIT or an unsolved selected slot must never be replaced with a search command.
+    // 目标完全 LOST 时没有策略回调，此时才允许外部策略模式使用自身反馈执行搜索。
+    // 外部 WAIT 或选定槽位求解失败时，不能用搜索命令覆盖策略结果。
     const bool lost_search = external && input_.prediction.state == modules::TrackerState::LOST &&
                              feedback.valid && (!input_.referee.valid || input_.referee.alive);
     const bool search = (!external || lost_search) && !output.command.valid;
-    // Search uses only self feedback. Warmup suppresses fire; training and bounded evaluation
-    // publish the shared controller's result and acknowledge that result.
+    // 搜索仅使用自身反馈。预热阶段禁射；训练与限时评估发布共享控制器的结果，
+    // 再通过发布确认更新控制状态。
     if (search) {
       if (!search_start_) {
         search_start_ = now;
         search_origin_yaw_ = feedback.actual_yaw;
       }
       output.command.valid = true;
-      // An absolute simulation-time sweep avoids shrinking the scan speed through actuator lag.
-      // Each search episode is anchored only to measured self yaw; mechanics still limit motion.
+      // 按绝对仿真时间生成扫描角度，避免执行器滞后使扫描速度逐步减小。
+      // 每次搜索以实测自身偏航角为起点，实际运动仍受机械约束限制。
       constexpr double SEARCH_YAW_RATE_RAD_S = 0.6;
       const double elapsed = static_cast<double>(now - *search_start_) * 1e-9;
       output.command.yaw = std::remainder(search_origin_yaw_ + SEARCH_YAW_RATE_RAD_S * elapsed,
@@ -375,8 +385,7 @@ class Bridge {
                     {"dual_state", a.dual_residual_state},
                     {"dual_input", a.dual_residual_input}};
       };
-      // Optional experiment side channel: wall times and solver state never enter policy/wire
-      // output.
+      // 宿主机耗时和求解器状态仅写入可选诊断文件，不进入策略通信输出。
       *diagnostics_ << Json{{"round_id", round_},
                             {"sim_time_ns", now},
                             {"tracker_state", modules::TrackerStateName(input_.prediction.state)},
@@ -413,7 +422,7 @@ class Bridge {
     return YAML::LoadFile(root_ + "/" + name + ".yaml");
   }
   std::string root_;
-  std::ostream* diagnostics_{nullptr};  ///< Optional offline diagnostics, never controller input.
+  std::ostream* diagnostics_{nullptr};  ///< 可选离线诊断输出，不作为控制器输入。
   std::uint64_t round_{0}, processed_{0};
   std::optional<std::uint64_t> last_tick_, last_frame_;
   std::optional<std::uint64_t> search_start_;
@@ -454,7 +463,7 @@ int main(int argc, char** argv) {
         bridge.Discard();
         std::cout << Json({{"ok", true}, {"kind", "cancelled"}}).dump() << std::endl;
       } catch (const std::exception& e) {
-        // Fail closed: a partial estimator/control update cannot be reused. Restart this process.
+        // 部分更新的估计或控制状态不可复用，出错后结束进程，由调用方重新启动。
         std::cout << Json({{"ok", false}, {"error", e.what()}}).dump() << std::endl;
         return 1;
       }

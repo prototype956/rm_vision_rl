@@ -1,7 +1,7 @@
-"""Model factories and self-describing checkpoints, independent of the training CLI.
+"""创建模型并管理包含配置元数据的检查点，供训练和评估入口复用。
 
-Only stateless MaskablePPO/MLP is implemented. A future recurrent integration must
-also supply sequence rollouts, hidden-state resets and masking, not just a GRU layer.
+当前仅支持无循环状态的 MaskablePPO/MLP。接入循环策略时，还需实现序列采样、
+隐藏状态复位和动作掩码，不能只增加 GRU 层。
 """
 import copy
 import hashlib
@@ -17,8 +17,9 @@ import torch
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from rmvision_rl.policy.observations import SCHEMA, VERSION
-from rmvision_rl.training.config import ENV_PATHS, validate_config
+from src.policy.observations import SCHEMA, VERSION
+from src.policy.decision_clock import CONTRACT as CLOCK_CONTRACT
+from src.training.config import ENV_PATHS, validate_config
 
 
 def _digest(value):
@@ -30,18 +31,21 @@ def _file_digest(path):
 
 
 def observation_contract(env):
-    """Keep the history axes intact; flattening is a policy extractor responsibility."""
-    return {
+    """生成观测与动作契约，保留历史时间轴；展平操作由策略特征提取器负责。"""
+    contract = {
         "version": VERSION, "schema_sha256": _digest(SCHEMA),
         "spaces": {name: {"shape": list(space.shape), "dtype": str(space.dtype)}
                    for name, space in env.observation_space.spaces.items()},
         "action_version": 1, "actions": ["track", "request_fire"],
         "action_count": int(env.action_space.n),
     }
+    if "decision_clock" in env.observation_space.spaces:
+        contract.update(action_version=2, decision_clock=copy.deepcopy(CLOCK_CONTRACT))
+    return contract
 
 
 def training_metadata(config, env):
-    """Snapshot effective paths and config fingerprints before starting any simulation."""
+    """在启动仿真前记录实际路径、配置指纹和观测契约。"""
     config = validate_config(config)
     wrapped = env.envs[0] if isinstance(env, DummyVecEnv) else env
     base = wrapped.unwrapped
@@ -81,7 +85,7 @@ def build_model(config, env):
 
 
 def read_checkpoint_metadata(path):
-    """Read plain JSON before choosing a loader or deserializing model/optimizer objects."""
+    """先读取 JSON 元数据，再选择加载器或反序列化模型及优化器。"""
     with ZipFile(path) as archive:
         try:
             metadata = json.loads(archive.read("rmvision.json"))
@@ -97,7 +101,7 @@ def read_checkpoint_metadata(path):
 
 
 def load_model(path, env, *, device=None):
-    """Restore policy and optimizer, but start a fresh simulator episode on next learn/reset."""
+    """恢复策略与优化器，并在下次 learn/reset 时开始新的仿真回合。"""
     metadata = read_checkpoint_metadata(path)
     config = copy.deepcopy(metadata["config"])
     if device is not None:
@@ -115,7 +119,7 @@ def load_model(path, env, *, device=None):
 
 
 def save_checkpoint(model, metadata, path, completed_updates):
-    """Commit weights, optimizer and metadata as one atomically replaced ZIP file."""
+    """将权重、优化器和元数据保存到同一个 ZIP 文件，并原子替换目标文件。"""
     path = Path(path)
     data = copy.deepcopy(metadata)
     data.update(num_timesteps=int(model.num_timesteps), completed_updates=completed_updates)
@@ -133,7 +137,7 @@ def save_checkpoint(model, metadata, path, completed_updates):
 
 
 def publish_latest(checkpoint, destination):
-    """Only publish an already completed checkpoint; never reserialize a partial update."""
+    """将已完成的检查点原子复制到目标路径，避免保存未完成的优化更新。"""
     destination = Path(destination)
     with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".latest-", suffix=".zip", delete=False) as file:
         temporary = Path(file.name)

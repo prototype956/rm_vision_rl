@@ -25,3 +25,27 @@ Gym 在预热确认后使用 `begin_training(round_id, start_ns)` 开启无截�
 尚未返回动作时可发送 `policy_cancel(token)`，取消已计算但未发布的命令则发送 `cancel`。
 二者都不发布命令或推进世界，并要求下一轮从 Reset 开始。Python 提供 `prepare/submit/cancel`
 对应这些操作，原有 `step(response, policy)` 同步接口和 `begin_evaluation` 有界评估保持可用。
+
+## C++ 编辑器与诊断
+
+安装 `clangd`、`clang-format` 和 `clang-tidy`，并在 VS Code 启用
+`llvm-vs-code-extensions.vscode-clangd` 扩展。以本仓库作为工作区文件夹打开时，
+`.vscode/settings.json` 使用 `native/vision_bridge` 作为 CMake 源码目录，构建结果位于
+`artifacts/build/vision-bridge`。先按上文命令完成 CMake 配置，生成编译数据库。
+
+根目录 `.clangd` 指向该数据库，复用真实编译参数和依赖路径；`.clang-format` 采用
+Google 风格、2 空格缩进和 100 列限制，中文注释保留手动分行。
+编辑器禁用 Microsoft C/C++ 的 IntelliSense，避免与 clangd 重复提供诊断。
+安装后在命令面板执行 `clangd: Restart language server`。
+
+从仓库根目录检查：
+
+```bash
+clangd --check=native/vision_bridge/bridge.cpp
+clangd --check=native/vision_bridge/policy_wire.cpp
+clang-tidy -p artifacts/build/vision-bridge native/vision_bridge/bridge.cpp
+```
+
+工作区配置使用相邻的 `../rm_vision_2027` 作为视觉源码路径；目录布局不同时，调整
+`cmake.configureSettings.VISION_ROOT` 并重新生成编译数据库。不会沿用旧版 clangd 的
+诊断屏蔽规则；出现诊断时应先核对编译参数和依赖版本。

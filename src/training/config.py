@@ -1,8 +1,9 @@
-"""Explicit MLP training configuration, separate from Gym and transport configuration."""
+"""读取和校验 MLP 训练配置，与 Gym 环境及通信配置分开管理。"""
 import copy
 import json
 import math
 from pathlib import Path
+from src.policy.decision_clock import validate_clock
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "config/training/static_fire_ppo.json"
@@ -10,7 +11,7 @@ ENV_PATHS = ("simulator_root", "vision_root", "simulator_binary", "bridge_binary
 
 
 def validate_config(value):
-    """Reject unsupported policy kinds and typos before starting simulator processes."""
+    """在启动仿真进程前检查策略类型和配置字段，拒绝不支持的配置。"""
     config = copy.deepcopy(value)
     required = {"version", "algorithm", "policy_kind", "seed", "device", "torch_threads",
                 "total_timesteps", "checkpoint_updates", "environment", "ppo"}
@@ -32,12 +33,18 @@ def validate_config(value):
         raise ValueError("device must be a nonempty PyTorch device string")
     env = config["environment"]
     if (not isinstance(env, dict) or not {"episode_steps", "scene_seed", "scenario"} <= env.keys()
-            or set(env) - {"episode_steps", "scene_seed", "scenario", *ENV_PATHS}):
+            or set(env) - {"episode_steps", "scene_seed", "scenario", "decision_clock", *ENV_PATHS}):
         raise ValueError("invalid environment config keys")
     integer("episode_steps", env["episode_steps"])
     integer("scene_seed", env["scene_seed"], 0)
     if not isinstance(env["scenario"], dict):
         raise ValueError("environment.scenario must be an object")
+    if "decision_clock" in env:
+        if env["decision_clock"] is None:
+            raise ValueError("omit decision_clock to disable it")
+        env["decision_clock"] = validate_clock(env["decision_clock"])
+    if "unlimited_heat" in env["scenario"] and type(env["scenario"]["unlimited_heat"]) is not bool:
+        raise ValueError("environment.scenario.unlimited_heat must be a boolean")
     for name in ENV_PATHS:
         if name in env:
             if not isinstance(env[name], str) or not env[name]:

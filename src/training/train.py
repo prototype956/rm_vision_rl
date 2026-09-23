@@ -1,4 +1,4 @@
-"""Single-environment PPO entry point; model selection and persistence live in models.py."""
+"""提供单环境 PPO 训练入口，模型创建和持久化由 models.py 负责。"""
 import argparse
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -14,16 +14,16 @@ import torch
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.logger import configure
 
-from rmvision_rl.training.config import DEFAULT_CONFIG, ROOT, read_config, validate_config
-from rmvision_rl.training.environment import make_environment, vectorize
-from rmvision_rl.training.models import (
+from src.training.config import DEFAULT_CONFIG, ROOT, read_config, validate_config
+from src.training.environment import make_environment, vectorize
+from src.training.models import (
     build_model, load_model, publish_latest, read_checkpoint_metadata,
     save_checkpoint, training_metadata,
 )
 
 
 class SamplingGuard(BaseCallback):
-    """Detect lost mask/timeout plumbing without changing environment rewards."""
+    """检查动作掩码和时间截断信息是否正确传递，保持环境原始奖励不变。"""
 
     def _on_step(self):
         for info in self.locals["infos"]:
@@ -51,8 +51,8 @@ def _write_manifest(path, value):
 
 
 def _log_update(model, completed_updates, start_steps, started):
-    # SB3 records training statistics after optimization. Dump here, not at rollout end,
-    # so the final update's losses also reach CSV and TensorBoard.
+    # SB3 在优化结束后记录训练统计，因此在此处写出日志，
+    # 使最后一次更新的损失也能写入 CSV 和 TensorBoard。
     for key, value in model.logger.name_to_value.items():
         if key.startswith("train/") and ("loss" in key or key == "train/approx_kl"):
             if not np.isfinite(value):
@@ -73,7 +73,19 @@ def _log_update(model, completed_updates, start_steps, started):
 
 
 def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, seed=None, device=None):
-    """Run complete rollouts; resume budgets are additional samples, never lifetime targets."""
+    """按完整采样批次训练；恢复时的预算表示新增步数。
+
+    Args:
+        config: 新训练使用的配置；恢复训练时使用检查点内的配置。
+        resume: 待恢复的检查点路径，与 config 和 seed 互斥。
+        output_dir: 新运行目录，必须尚不存在。
+        timesteps: 本次新增采样步数，向上取整到完整 rollout。
+        seed: 新模型的随机种子，不影响固定场景种子。
+        device: 覆盖配置中的 PyTorch 计算设备。
+
+    Returns:
+        本次运行的输出目录，包含日志和完整更新后保存的模型。
+    """
     previous = None
     if resume is not None:
         if config is not None or seed is not None:
@@ -90,7 +102,7 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
     if timesteps is not None:
         config["total_timesteps"] = timesteps
     config = validate_config(config)
-    # Explicit CUDA requests must not silently become CPU runs.
+    # 显式请求 CUDA 时应检查可用性，避免静默退回 CPU。
     requested_device = torch.device(config["device"])
     if requested_device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable in this PyTorch installation; use --device cpu")
@@ -106,6 +118,8 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
         output = Path(output_dir).resolve()
         output.mkdir(parents=True, exist_ok=False)
     print(f"Output: {output}\nRequested additional samples: {requested}; complete-rollout budget: {actual}", flush=True)
+    unlimited_heat = config["environment"]["scenario"].get("unlimited_heat", False)
+    print(f"Heat system: {'disabled (unlimited heat)' if unlimited_heat else 'enabled'}", flush=True)
     manifest = {"status": "starting", "requested_timesteps": requested, "rounded_timesteps": actual,
                 "resume_from": str(resume) if resume else None, "config": config}
     _write_manifest(output / "run.json", manifest)
@@ -135,8 +149,8 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
             guard = SamplingGuard()
             started = perf_counter()
             while model.num_timesteps < target_steps:
-                # Constant LR/clip permit one learn() per full rollout without resetting
-                # observations or optimizer state. Saving happens only AFTER train() returns.
+                # 学习率和裁剪阈值固定，因此每个完整 rollout 可单独调用 learn()，
+                # 保留观测和优化器状态；仅在 train() 完成后保存检查点。
                 before = model.num_timesteps
                 model.learn(total_timesteps=rollout_steps, reset_num_timesteps=False,
                             log_interval=None, callback=guard)
@@ -159,7 +173,7 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
         manifest.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
                         error=f"{type(error).__name__}: {error}")
         _write_manifest(output / "run.json", manifest)
-        # No error-path save: model may contain a partial rollout or optimizer update.
+        # 异常时可能只完成部分采样或优化更新，不能将其保存为完整检查点。
         raise
     print(f"Completed {actual} samples; lifetime steps {model.num_timesteps}; model: {output / 'final.zip'}", flush=True)
     return output
@@ -174,8 +188,6 @@ def main():
     parser.add_argument("--seed", type=int, help="new model RNG seed; does not change the fixed scene seed")
     parser.add_argument("--device", help="PyTorch device, defaults to config (cpu)")
     parser.add_argument("--output-dir", type=Path, help="new run directory; must not already exist")
-    parser.add_argument("--no-view", action="store_true", help="skip automatic checkpoint evaluation and replay")
-    parser.add_argument("--viewer-binary", type=Path, help="optional training_preview executable")
     args = parser.parse_args()
     if args.resume and args.seed is not None:
         parser.error("--seed cannot override the saved seed on --resume")
@@ -186,17 +198,8 @@ def main():
 
     previous_handler = signal.signal(signal.SIGTERM, stop)
     try:
-        output = run_training(config, resume=args.resume, output_dir=args.output_dir,
-                              timesteps=args.timesteps, seed=args.seed, device=args.device)
-        if not args.no_view:
-            from rmvision_rl.training.view import evaluate_checkpoint, open_replay
-            try:
-                replay = evaluate_checkpoint(output / "final.zip", device=args.device)
-                open_replay(replay, viewer_binary=args.viewer_binary)
-            except (Exception, KeyboardInterrupt) as error:
-                # Training already succeeded. A separate viewing failure must not change its status.
-                print(f"Training is complete; evaluation/replay stopped: {type(error).__name__}: {error}",
-                      flush=True)
+        run_training(config, resume=args.resume, output_dir=args.output_dir,
+                     timesteps=args.timesteps, seed=args.seed, device=args.device)
     finally:
         signal.signal(signal.SIGTERM, previous_handler)
 

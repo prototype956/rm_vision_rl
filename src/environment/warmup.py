@@ -1,7 +1,7 @@
-"""Disabled-fire warmup and a continuous handoff to tracking evaluation.
+"""在禁射状态下建立稳定跟踪，并连续切换到正式运行阶段。
 
-Lifecycle metadata is for the experiment owner, never a policy observation or action mask.
-Only detector/estimator results and own telemetry can decide readiness.
+生命周期元数据仅供会话管理使用，不进入策略观测或动作掩码。
+就绪判断仅使用检测、估计结果和自身遥测。
 """
 from dataclasses import asdict, dataclass
 
@@ -29,7 +29,7 @@ class WarmupConfig:
 
 
 class TrackingConfirmation:
-    """Count distinct consecutive fresh tracking frames, not 100 Hz control ticks."""
+    """按连续且新鲜的不同图像帧确认跟踪，不按 100 Hz 控制调用次数计数。"""
 
     def __init__(self, config):
         self.config = config
@@ -72,12 +72,11 @@ class TrackingConfirmation:
 
 
 class WarmupSession:
-    """Own the reset → warmup → ready/timed_out boundary for one simulator/bridge pair.
+    """管理一对仿真与桥接从重置到预热就绪或超时的状态转换。
 
-    A READY handoff retains physical time, estimator/MPC history and command delay queues.
-    This adapter still forces fire=False during subsequent tracking evaluation.
-    On an ambiguous publication failure, resolve the client's pending transport request,
-    then explicitly reset both owners through reset(); never continue partial warmup state.
+    就绪时保留物理时间、估计器与 MPC 历史，以及命令延迟队列。
+    通过本类继续跟踪时仍保持禁射。发布结果不确定时，应先处理客户端待确认请求，
+    再调用 reset() 重置两端，不能沿用部分更新的预热状态。
     """
 
     def __init__(self, client, bridge, config=None):
@@ -129,8 +128,8 @@ class WarmupSession:
             result = self.bridge.step(self.response)
             ready = self.confirmation.observe(now, self.response["data"]["feedback"], result)
             self._publish(result)
-            # Readiness takes effect only after the final disabled-fire publication is acknowledged.
-            # At the exact timeout boundary, an already confirmed publication wins the tie.
+            # 只有最后一次禁射命令发布得到确认后，就绪状态才生效。
+            # 恰好到达超时边界时，已完成确认的就绪结果优先。
             if ready:
                 self.status = "ready"
                 self.evaluation_start_ns = self.response["sim_time_ns"]
@@ -143,13 +142,13 @@ class WarmupSession:
             raise
 
     def advance_tracking(self):
-        """Continue a READY round with zeroed evaluation time, without restarting estimation."""
+        """从就绪状态继续禁射跟踪，以预热完成时刻为计时起点，保留估计历史。"""
         if self.status != "ready":
             raise RuntimeError("tracking evaluation requires a ready warmup")
         try:
             result = self.bridge.step(self.response)
             self._publish(result)
-            # Later target loss belongs to evaluation; it must not restart warmup or its clock.
+            # 正式阶段丢失目标属于评估结果，不能重新预热或重置计时。
             return dict(warmup=self.info(), vision=result)
         except Exception:
             self.status = "fault"

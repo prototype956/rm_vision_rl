@@ -1,11 +1,28 @@
 # 辅助工具
 
-当前只保留 `config/prepare_vision_profile.py`。历史基线、验收和诊断脚本已删除，不再使用旧命令。环境启动和策略示例见[构建与运行](../docs/running.md)。
+此目录维护训练分析和人工验证工具。工具依赖 `src` 的运行接口，
+运行库和训练入口不反向依赖工具。所有命令从仓库根目录执行，完整参数见[构建与运行](../docs/running.md)。
 
-## 配置副本生成器
+## 训练分析与人工验证
 
-[prepare_vision_profile.py](config/prepare_vision_profile.py) 复制视觉项目的 `src/config/modules/`，按 [mpc-recovery.json](../config/policy/mpc-recovery.json) 调整 MPC 单次求解迭代上限。副本保持原目录层级，另生成 `profile.json` 记录来源和配置指纹，不修改默认配置，也不自动选择运行时配置。
+| 文件 | 职责 |
+| --- | --- |
+| [training/analysis.py](training/analysis.py) | 独立评估已完成训练的检查点、选择最佳模型、组织报告和回放 |
+| [training/report.py](training/report.py) | 生成训练曲线和模型对比 HTML 报告 |
+| [training/view.py](training/view.py) | 单模型评估、回放记录和原生窗口显示 |
+| [training/manual.py](training/manual.py) | 人工操作实际 Gym 环境，记录逐步奖励和事件 |
+| [training/diagnose.py](training/diagnose.py) | 从检查点执行短期 PPO 更新并采集学习信号 |
+| [training/diagnostic_report.py](training/diagnostic_report.py) | 生成学习信号诊断报告 |
 
-**当前不可直接运行：** 仍从已删除的 `tools.validation.validate` 导入 `require`，包括 `--help` 都会报 `ModuleNotFoundError`。后续应解除此依赖，无需恢复整套验收工具。本次文档重建未修改脚本。
+```bash
+python -m tools.training.analysis --run-dir <训练目录> --no-view
+python -m tools.training.view --checkpoint <模型.zip>
+python -m tools.training.manual --config config/training/static_fire_ppo.json
+python -m tools.training.diagnose --checkpoint <模型.zip> --rollouts 3
+```
 
-设计参数为 `--vision-root`、`--profile`、`--output`。输出必须是视觉项目之外的新目录，源迭代上限须匹配 profile 的 `source_max_iterations`。当前 profile 指定 50 → 200，不代表已验证的通用配置。
+训练使用 `python -m src.training.train`，完成后按需运行上述工具。
+分析、回放、人工操作和诊断入口统一位于 `tools.training`，运行库位于 `src`。
+`report.py` 和 `diagnostic_report.py` 由对应工具调用。
+
+历史 `tools.validation` 等验收命令不再使用。

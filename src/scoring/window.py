@@ -1,7 +1,7 @@
-"""D29 evaluation-only ledger: classify actual launches by [start, end), never by requests.
+"""按实际出膛时间在 [start, end) 内的弹丸统计独立评估伤害。
 
-Physical rewards/events remain unchanged. An incomplete or invalid ledger never exposes an
-official score, and exact retransmissions do not accumulate damage twice.
+不修改物理奖励和事件。账本不完整或校验失败时不提供正式分数；
+完全一致的事件重传不会重复累计伤害。
 """
 import json
 
@@ -13,6 +13,10 @@ def integer(value, name, minimum=0):
 
 
 class WindowScore:
+    """按出膛窗口关联弹丸事件，校验完整性并汇总正式评估分数。
+
+    窗口采用纳秒时间戳和左闭右开区间，仅完整自然结算后提供 official_damage。
+    """
     MAX_EVENTS = 100_000
     MAX_SHOTS = 10_000
 
@@ -31,7 +35,7 @@ class WindowScore:
         self.status, self.error = "invalid", str(reason)
 
     def shorten(self, end_ns):
-        """A physical death closes the window early, retaining the exclusive launch cutoff."""
+        """因机器人死亡提前关闭评估窗口，仍将结束时刻作为出膛归属的右开边界。"""
         end_ns = integer(end_ns, "end_ns", self.start_ns + 1)
         if self.closed or self.status != "collecting" or end_ns > self.end_ns:
             raise ValueError("cannot shorten this evaluation window")
@@ -41,6 +45,10 @@ class WindowScore:
                 shot["classification"] = "at_or_after_end"
 
     def ingest(self, response):
+        """接收同一回合的事件，去重并关联出膛、伤害和弹丸终结。
+
+        校验失败会将账本置为 invalid 并抛出异常，之后必须开始新的评估账本。
+        """
         if self.status == "invalid":
             raise RuntimeError("score ledger is invalid; start a new round")
         try:
@@ -109,6 +117,10 @@ class WindowScore:
             raise
 
     def finish(self, response):
+        """核对物理计数器和自然结算状态，返回评估汇总。
+
+        结算超时标记为 incomplete；只有完整结算且账本一致才提供正式分数。
+        """
         self.ingest(response)
         try:
             state = response["data"]["settlement"]
@@ -132,6 +144,7 @@ class WindowScore:
             raise
 
     def summary(self):
+        """返回当前账本摘要；尚未完整结算时 official_damage 为 None。"""
         shots = list(self.shots.values())
         eligible = [s for s in shots if s["classification"] == "eligible"]
         damage = sum(s["damage"] for s in eligible)

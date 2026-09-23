@@ -1,0 +1,3 @@
+# 使用桥接程序的真实 C++20 编译参数和依赖路径。
+CompileFlags:
+  CompilationDatabase: artifacts/build/vision-bridge

@@ -10,6 +10,12 @@
   "environment": {
     "episode_steps": 500,
     "scene_seed": 17,
+    "decision_clock": {
+      "min_interval_ms": 50,
+      "max_interval_ms": 100,
+      "resample": "decision",
+      "seed": 17
+    },
     "scenario": {
       "motion": {"kind": "static"},
       "target_distance_m": 4.0,
@@ -17,6 +23,7 @@
       "target_yaw_rad": 0.0,
       "controlled_yaw_rad": 0.0,
       "target_hp": 100000,
+      "unlimited_heat": true,
       "measurements": {
         "noise_std_px": 0.25,
         "latency_ms": 20,

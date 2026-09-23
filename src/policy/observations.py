@@ -1,4 +1,4 @@
-"""Versioned, finite float32 policy features and an eight-control-tick history (oldest first)."""
+"""生成带版本的有限 float32 特征，维护从旧到新排列的 8 个控制周期历史。"""
 from array import array
 from collections import deque
 import math
@@ -15,7 +15,17 @@ FEATURE_NAMES = SCHEMA["features"]
 
 
 def encode(observation):
-    """Read named semantic fields only; never flatten metadata or evaluation dictionaries."""
+    """按固定字段顺序编码观测，排除传输元数据和评估真值。
+
+    Args:
+        observation: C++ 火控提供的语义观测，包含估计、自身状态和四个候选槽位。
+
+    Returns:
+        特征名称、90 个缩放至 [-1, 1] 的 float32 精度数值及九动作布尔掩码。
+
+    Raises:
+        ValueError: 特征非有限、字段长度或顺序不符合 schema，或动作掩码格式错误。
+    """
     o = observation
     values, names = [], []
     def add(name, value, scale=1.0):
@@ -50,8 +60,8 @@ def encode(observation):
         add('feedback.'+axis+'.cos', math.cos(f[axis+'_rad']))
         add('feedback.'+axis+'_velocity_div_10radps', f[axis+'_velocity_rad_s'], 10)
     for field, scale in (('prediction_age_s',.1),('feedback_age_s',.1),('referee_age_s',.3),('since_request_s',1)):
-        # Null ages are unavailable/stale, not fresh zero-age samples. No previous request
-        # means the interval is unrestricted, equivalent to a saturated elapsed interval.
+        # 缺失的数据年龄按不可用或过期处理，不能编码成新鲜的零年龄样本。
+        # 从未请求射击时不存在请求间隔限制，按已达到归一化上限编码。
         add(field+'_normalized', scale if o[field] is None else o[field], scale)
     for slot in range(-1,4):
         add('previous_slot.'+str(slot), o['previous_slot'] == slot)
@@ -68,7 +78,7 @@ def encode(observation):
     for i,c in enumerate(o['candidates']):
         prefix=f'candidate.{i}.'
         add(prefix+'valid',c['valid'])
-        # Invalid candidates have explicit zero padding, not stale slot data.
+        # 无效候选填零，避免保留旧槽位数据。
         valid = bool(c['valid'])
         yaw = c['yaw_rad']-f['yaw_rad'] if valid else 0
         add(prefix+'yaw_error_sin',math.sin(yaw) if valid else 0)
@@ -85,10 +95,11 @@ def encode(observation):
 
 
 class TensorPolicy:
-    """EvaluationSession calls begin_step even when LOST suppresses the policy callback.
+    """维护策略特征历史，并将独立副本交给 actor。
 
-    Reset clears the episode; no-observation ticks carry zeros with valid=false. The adapter
-    changes neither masks nor returned actions. The bridge remains responsible for action guards.
+    即使 LOST 状态跳过策略回调，EvaluationSession 仍调用 begin_step。
+    重置时清空历史；无观测周期填零并标记 valid=false。
+    本适配器保留原动作掩码和返回动作，由桥接执行动作合法性检查。
     """
     def __init__(self, actor):
         self.actor=actor
@@ -104,7 +115,7 @@ class TensorPolicy:
         self.generation=None
 
     def set_generation(self, generation):
-        """Metadata resets history but is never supplied to the actor as a feature."""
+        """目标代次变化时清空历史；代次仅用于复位，不作为 actor 的输入特征。"""
         if self.generation is not None and generation != self.generation:
             pending = self.pending
             self.reset()
@@ -128,6 +139,6 @@ class TensorPolicy:
         self.rows[-1]=values
         self.valid[-1]=True
         self.filled=True
-        # Detached lists prevent an actor from changing future history or masks.
+        # 向 actor 提供独立列表，防止其修改后续周期的历史或掩码。
         return self.actor(dict(version=VERSION,features=[list(v) for v in self.rows],
                                valid=list(self.valid),action_mask=mask))

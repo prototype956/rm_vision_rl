@@ -1,0 +1,10 @@
+# 与视觉项目保持一致的基础 C++ 排版约定。
+BasedOnStyle: Google
+Standard: c++20
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+# 中文注释手动按语义分行，避免格式化器重新拼接段落。
+ReflowComments: false

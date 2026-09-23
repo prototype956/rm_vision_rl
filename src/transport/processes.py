@@ -1,4 +1,4 @@
-"""Own one training subprocess and socket; always reap it, including failed checks."""
+"""管理训练子进程及其 socket，正常退出或检查失败时均回收资源。"""
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import time
 
-from rmvision_rl.transport.client import TrainingClient
+from src.transport.client import TrainingClient
 
 
 @contextmanager

@@ -1,4 +1,4 @@
-"""Length-prefixed local client for the phase-2 simulator (not a Gymnasium environment)."""
+"""通过带长度前缀的本地协议访问仿真进程，供上层环境组织步进。"""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,7 @@ MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
 
 class TrainingClient:
+    """管理仿真请求编号及待确认请求，使用 Unix socket 同步通信。"""
     def __init__(self, path: str | Path, timeout: float = 120):
         self.path = str(path)
         self.timeout = timeout
@@ -61,6 +62,7 @@ class TrainingClient:
         return self.retry_pending()
 
     def retry_pending(self) -> dict:
+        """使用原请求编号重新获取待确认响应，避免通信恢复时创建重复操作。"""
         if self.pending is None:
             raise RuntimeError("no unresolved request")
         response = self.exchange(self.pending)
@@ -76,6 +78,7 @@ class TrainingClient:
 
     def advance(self, *, yaw_rad=0.0, pitch_rad=0.0, distance_m=4.0,
                 valid=True, fire=False) -> dict:
+        """提交控制命令并请求下一控制步；角度单位为 rad，距离单位为 m。"""
         return self.request("advance", round_id=self.round_id, step_id=self.step_id + 1,
                             command=dict(valid=valid, yaw_rad=yaw_rad, pitch_rad=pitch_rad,
                                          distance_m=distance_m, fire=fire))
@@ -84,6 +87,7 @@ class TrainingClient:
         return self.request("inspect")
 
     def end_window(self, max_settle_steps=1000) -> dict:
+        """关闭当前射击窗口并开始自然结算，本请求不推进物理时间。"""
         return self.request("end_window", round_id=self.round_id, step_id=self.step_id,
                             max_settle_steps=max_settle_steps)
 

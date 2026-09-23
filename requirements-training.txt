@@ -3,3 +3,4 @@ torch==2.8.0
 stable-baselines3==2.9.0
 sb3-contrib==2.9.0
 tensorboard>=2.16,<3
+plotly>=6,<7

@@ -1,4 +1,4 @@
-"""Own a detector-frame-only C++ bridge; actual simulator publication is acknowledged separately."""
+"""管理接收二维检测帧的 C++ 桥接，仿真命令发布后需单独确认。"""
 from contextlib import contextmanager
 import copy
 import json
@@ -7,7 +7,39 @@ import select
 import subprocess
 
 
+def control_referee(data, now_ns):
+    """合并低频裁判规则与最新的自身武器机械禁射状态。
+
+    热量、生命和弹量沿用裁判采样的时间戳与有效性；第 5–7 位
+    （射击间隔、供弹、枪口状态）来自自身武器反馈，不使用评估真值。
+    旧仿真器缺少此通道时保留原有的保守处理。
+    """
+    referee = copy.deepcopy(data["self_referee"])
+    if "self_weapon" not in data:
+        return referee
+    weapon = data["self_weapon"]
+    if not isinstance(weapon, dict) or type(weapon.get("version")) is not int or weapon["version"] != 1:
+        raise ValueError("unsupported self_weapon feedback version")
+    sample = weapon.get("sample_ns")
+    blocks = weapon.get("fire_blocks")
+    if (type(sample) is not int or sample < 0 or type(blocks) is not int or
+            blocks < 0 or blocks & ~0xe0 or type(weapon.get("valid")) is not bool):
+        raise ValueError("invalid self_weapon feedback")
+    if not weapon["valid"] or not 0 <= now_ns - sample <= 10_000_000:
+        # 自身机械反馈缺失或过期时，不能解除已有禁射条件。
+        referee["valid"] = False
+        referee["fire_permitted"] = False
+        return referee
+    old_blocks = referee["fire_blocks"]
+    referee["fire_blocks"] = (old_blocks & ~0xe0) | blocks
+    # 保留原因位无法解释的显式禁射；其他情况根据合并后的原因重新判定。
+    referee["fire_permitted"] = bool(
+        (referee["fire_permitted"] or old_blocks != 0) and referee["fire_blocks"] == 0)
+    return referee
+
+
 class VisionBridge:
+    """管理 C++ 桥接的同步 JSONL 请求及当前待提交周期。"""
     def __init__(self, process):
         self.process = process
         self._prepared = None
@@ -30,20 +62,48 @@ class VisionBridge:
         return self.exchange(dict(op="reset", round_id=round_id))
 
     def prepare(self, response, *, external=True):
-        """Stop at the policy callback, or cache a no-callback command; never publish here."""
+        """准备当前控制周期，在策略回调处暂停或缓存无需回调的命令。
+
+        本方法不发布命令或推进物理；后续必须提交并确认，或取消该周期。
+
+        Args:
+            response: 当前仿真响应，仅提取控制所需字段。
+            external: 是否使用外部策略回调；False 表示规则控制。
+
+        Returns:
+            策略观测或已计算的控制结果副本。
+
+        Raises:
+            RuntimeError: 上一周期尚未处理，或桥接返回错误。
+            TimeoutError: 等待桥接响应超时。
+        """
         if self._prepared is not None:
             raise RuntimeError("submit/ack or cancel the prepared cycle first")
-        # Explicit allowlist: evaluation truth, events, rewards, scenario and seed stay outside C++.
+        # 仅转发明确列出的控制字段，评估真值、事件、奖励、场景和种子不进入 C++。
         data = response["data"]
         result = self.exchange(dict(op="step_policy" if external else "step",
                                     round_id=response["round_id"], sim_time_ns=response["sim_time_ns"],
                                     visual_frames=data["visual_frames"], feedback=data["feedback"],
-                                    self_referee=data["self_referee"]))
+                                    self_referee=control_referee(data, response["sim_time_ns"])))
         self._prepared = result
         return copy.deepcopy(result)
 
     def submit(self, action):
-        """Resume exactly the prepared callback with its original correlation token."""
+        """使用原关联 token 提交动作，恢复同一次暂停的控制计算。
+
+        不向仿真发布命令或推进物理，调用前必须先获得待决策观测。
+
+        Args:
+            action: [0, 8] 内的 Python 整数，且必须被当前动作掩码允许。
+
+        Returns:
+            包含待发布控制命令的桥接响应副本。
+
+        Raises:
+            RuntimeError: 当前没有等待动作的策略回调，或桥接返回错误。
+            ValueError: 动作类型、范围或掩码检查失败。
+            TimeoutError: 等待桥接响应超时。
+        """
         result = self._prepared
         if result is None or result.get("kind") != "policy_observation":
             raise RuntimeError("no policy callback awaiting an action")
@@ -55,7 +115,7 @@ class VisionBridge:
         return copy.deepcopy(self._prepared)
 
     def cancel(self):
-        """Discard an unsubmitted cycle. C++ requires Reset afterwards, without publication."""
+        """取消未提交周期，不发布命令；取消后 C++ 桥接必须重新 Reset。"""
         if self._prepared is None:
             return
         if self._prepared.get("kind") == "policy_observation":
@@ -69,20 +129,21 @@ class VisionBridge:
         result = self.prepare(response, external=policy is not None)
         if result.get("kind") == "policy_observation":
             try:
-                from rmvision_rl.policy.observations import TensorPolicy
+                from src.policy.observations import TensorPolicy
                 if isinstance(policy, TensorPolicy):
                     policy.set_generation(result["metadata"]["track_generation"])
-                # The caller sees a copy of the semantic whitelist, never tokens or experiment metadata.
+                # 策略仅接收语义观测的副本，不接收 token 或实验元数据。
                 action = policy(copy.deepcopy(result["observation"]))
                 return self.submit(action)
             except Exception:
-                # A partial callback cannot be resumed as a new cycle or silently replaced with WAIT.
+                # 回调失败后不能作为新周期继续，也不能静默替换为 WAIT。
                 self.process.terminate()
                 self.process.wait(timeout=5)
                 raise
         return result
 
     def ack(self, success):
+        """将仿真命令发布结果反馈给 C++，成功交换后清除本地待处理周期。"""
         result = self.exchange(dict(op="ack", success=success))
         self._prepared = None
         return result

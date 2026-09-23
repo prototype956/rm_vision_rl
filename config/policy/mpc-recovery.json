@@ -1,6 +1,0 @@
-{
-  "version": 1,
-  "name": "mpc_recovery_candidate",
-  "source_max_iterations": 50,
-  "max_iterations": 200
-}

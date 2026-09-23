@@ -1,4 +1,4 @@
-"""RM control adapters; Gym registration is available when Gymnasium is installed."""
+"""提供 RoboMaster 控制适配接口，并在 Gymnasium 可用时注册环境。"""
 try:
     from gymnasium.envs.registration import register
 except ModuleNotFoundError as error:
@@ -6,4 +6,4 @@ except ModuleNotFoundError as error:
         raise
 else:
     register(id="RMStaticFire-v0",
-             entry_point="rmvision_rl.environment.static_fire:StaticFireEnv")
+             entry_point="src.environment.static_fire:StaticFireEnv")

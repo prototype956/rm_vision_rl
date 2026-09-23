@@ -49,7 +49,7 @@ artifacts/venv/bin/python -m pip install -r requirements.txt
 ```bash
 artifacts/venv/bin/python - <<'PYCODE'
 import gymnasium as gym
-import rmvision_rl  # 注册 RMStaticFire-v0
+import src  # 注册 RMStaticFire-v0
 
 env = gym.make('RMStaticFire-v0')
 try:
@@ -97,7 +97,7 @@ obs, info = env.reset(seed=17, options={'scenario': {
 
 ```bash
 artifacts/venv/bin/python -m pip install -r requirements-training.txt
-artifacts/venv/bin/python -m rmvision_rl.training.train --help
+artifacts/venv/bin/python -m src.training.train --help
 ```
 
 当前固定 PyTorch 2.8.0、SB3/SB3-Contrib 2.9.0；PyTorch 的 PyPI ARM64 包支持本次 CPU
@@ -107,7 +107,7 @@ artifacts/venv/bin/python -m rmvision_rl.training.train --help
 开始一轮训练：
 
 ```bash
-artifacts/venv/bin/python -m rmvision_rl.training.train \
+artifacts/venv/bin/python -m src.training.train \
   --config config/training/static_fire_ppo.json \
   --output-dir artifacts/training/static-front-v1
 ```
@@ -123,18 +123,51 @@ MLP，以及单环境 `DummyVecEnv`。`--timesteps` 覆盖本次预算，向上�
 默认 PPO 训练回合为 5 秒（500 步），预热单独计时；要调整回合长度、rollout 或 minibatch，编辑配置副本对应的
 `environment.episode_steps`、`ppo.n_steps` 和 `ppo.batch_size`。minibatch 必须整除 rollout。
 
+新训练和不带 `--checkpoint` 的手动入口默认启用随机射击决策时钟：
+
+```json
+"decision_clock": {
+  "min_interval_ms": 50,
+  "max_interval_ms": 100,
+  "resample": "decision",
+  "seed": 17
+}
+```
+
+该对象放在 `environment` 下。每次射击决策后，从 50、60、70、80、90、100 ms 等概率抽取下一间隔；无论本次是否开火都推进时钟，不在中间的 10 ms 步重试。非决策步继续瞄准、物理和奖励更新。`resample: "episode"` 可改为每回合采样固定周期，端点相同则是固定周期。省略对象可关闭；`--seed` 只改 PPO 种子，时钟使用自己的 seed。
+
+手动测试当前配置：
+
+```bash
+artifacts/venv/bin/python -m tools.training.manual --config config/training/static_fire_ppo.json
+```
+
+HUD 显示距下次决策的时间；长按 F 只在到期且原火控合法时提交请求。R 清零奖励、重新预热相同场景，并切换到下一个时钟随机流。每回合仍为 500 步/5 秒。时钟会跳过部分仍在冷却中的机会，因此启用后持续发射分数可能低于原无时钟的 1380；随机发射伤害也不保证严格按概率缩放。
+
+旧检查点保存的配置没有该对象，`--resume`、`--checkpoint` 回放及手动模式都会保持旧行为；新增观测/动作时序需要新建训练，不能静默改变旧检查点。所有候选模型评估使用各自保存的时钟配置，并从随机流 0 开始。
+
+新训练默认设置 `environment.scenario.unlimited_heat=true`：双方不累积热量，也不会触发热量
+锁定；遥测和观测中的当前热量为 0，热量上限/冷却速率保留预设有限值。射击间隔、供弹、
+云台及其他合法动作约束继续生效。启动终端会显示热量模式，配置随检查点和回放保存。
+将该字段改为 `false` 可重新启用热量；省略字段时也启用热量，以兼容旧场景和检查点。
+旧检查点的 `--resume` 和回放沿用其保存的模式，不受新默认值影响；本次无限热量训练请使用
+新建训练命令，不从旧的有热量检查点恢复。
+
 运行输出包括：
 
 - `run.json`：生效配置、模型/观测信息、配置指纹、依赖版本、预算和运行状态。
 - `episodes.monitor.csv`：每个完整回合的原始奖励、伤害、实际出膛数、长度及结束原因。
+- `environment/env-*/decision-clock.jsonl`：启用时钟时的逐次射击机会、随机间隔、原火控合法性和请求接受结果。
 - `logs/progress.csv` 和 TensorBoard event：每次完整更新后的损失、KL、熵损失、采样速度和回合均值。
 - `checkpoint_<累计步数>.zip`：每 4 次完整更新保存一次；`latest.zip` 原子指向最近保存的完整状态。
 - `final.zip`：正常结束时保存，同时更新 `latest.zip`。尚未结束回合的奖励不会伪装成完整回合数据。
+- `best.zip`：CLI 后处理按独立评估完整窗口归属伤害选出的最佳已保存模型；同分优先累计步数较大的模型。
+- `analysis/analysis-*/`：每次分析独立保存模型与日志副本、逐模型评估回放、`analysis.json`、本次 `best.zip` 和离线交互 `report.html`。
 
 追加训练：
 
 ```bash
-artifacts/venv/bin/python -m rmvision_rl.training.train \
+artifacts/venv/bin/python -m src.training.train \
   --resume artifacts/training/static-front-v1/latest.zip \
   --timesteps 65536 \
   --output-dir artifacts/training/static-front-v1-resume
@@ -147,6 +180,11 @@ Ctrl+C、SIGTERM 或运行故障会退出并清理进程，保留已有完整检
 
 查看训练曲线：
 
+训练 CLI 默认在训练结束后生成并打开本地交互报告，包含完整回合奖励、最近 20 回合移动平均、
+伤害、实际出膛数、PPO 指标及独立评估模型对比。前 19 回合的移动平均使用已有回合；缺失或
+非有限指标显示空缺，不补零。横轴为累计训练步数，恢复训练的回合曲线加上起始偏移。
+报告内嵌 Plotly，可离线打开、悬停查看数值、缩放和切换图例。原有 TensorBoard 仍可使用：
+
 ```bash
 artifacts/venv/bin/tensorboard --logdir artifacts/training --port 6006
 ```
@@ -157,8 +195,8 @@ artifacts/venv/bin/tensorboard --logdir artifacts/training --port 6006
 artifacts/venv/bin/python - <<'PYCODE'
 from pathlib import Path
 from sb3_contrib.common.maskable.utils import get_action_masks
-from rmvision_rl.training.environment import make_environment
-from rmvision_rl.training.models import read_checkpoint_metadata, load_model
+from src.training.environment import make_environment
+from src.training.models import read_checkpoint_metadata, load_model
 
 checkpoint = Path('artifacts/training/static-front-v1/final.zip')
 metadata = read_checkpoint_metadata(checkpoint)
@@ -182,9 +220,40 @@ PYCODE
 
 ### 训练结束后的模型回放
 
-训练 CLI 正常结束后，先保存 `final.zip`、关闭训练进程，再自动执行一个独立评估回合并打开
-三维回放。新训练和恢复训练均如此；无人值守或只检查训练链路时添加 `--no-view`。
-Python 函数 `run_training()` 只负责训练；自动查看由 CLI 衔接。
+训练 CLI 正常结束后保存 `final.zip` 并关闭训练进程。独立运行 `tools.training.analysis`，
+逐个评估本次目录的
+`checkpoint_*.zip` 和 `final.zip`。`latest.zip` 与已有 `best.zip` 不参与；同一步数只评估一次，
+优先 `final.zip`。评估沿用模型场景、种子和窗口，使用确定性带掩码推理，完整结算伤害
+`official_damage` 最高者保存为 `best.zip`，同分选累计步数较大的模型。
+
+每次分析使用模型固定副本，记录 SHA-256、来源、步数、排名、得分、回放和状态；分析目录的
+`best.zip` 不受后来重新分析影响，训练目录的 `best.zip` 指向最近一次成功选优的结果。
+预热失败、结算不完整或异常的候选不参与排名；部分失败标注“有效候选中的最佳”。全部失败
+不发布新 `best.zip`，之前的文件保留但不代表本次结果；本次结果以 `analysis.json` 为准。
+报告仍展示已有训练曲线和失败说明。这里的最佳仅指本次目录中已保存模型在固定场景下的表现，
+不代表所有更新时刻或跨场景泛化表现；恢复训练不扫描此前目录。
+
+评估结束后打开 HTML 报告，并同时启动 Final／Best 两个三维回放窗口。标题和 HUD 标识角色、
+来源模型、累计步数与完整结算得分；如果两者相同，复用同一次评估数据，仍开两个窗口并标注
+`Final = Best`。窗口独立操作，关闭一个不影响另一个；Ctrl+C／SIGTERM 会清理所有所属回放进程。
+
+训练 CLI 和 `run_training()` 均只负责训练，不依赖工具模块，也不自动评估或打开窗口。
+分析、回放、诊断和人工操作位于 `tools/training/`，单向复用训练层的模型与环境接口。
+分析命令的 `--no-view` 只禁止打开窗口，仍评估并保存最佳模型、回放和报告。
+训练命令不再接受 `--no-view`、`--skip-analysis` 或 `--viewer-binary`。
+
+给已有完整训练目录补做分析（每次新建分析目录，不复用旧评分）：
+
+```bash
+artifacts/venv/bin/python -m tools.training.analysis \
+  --run-dir artifacts/training/static-front-v1
+# 无窗口评估；仍生成 best.zip、回放和报告
+artifacts/venv/bin/python -m tools.training.analysis \
+  --run-dir artifacts/training/static-front-v1 --no-view
+```
+
+分析入口也支持 `--device` 和 `--viewer-binary`。它只接受 `run.json` 状态为 `complete` 的目录；
+全部评估失败或报告生成失败返回非零退出码；独立分析不改变原训练成功状态。
 
 首次使用时构建回放程序：
 
@@ -196,9 +265,9 @@ cargo build --offline --release --no-default-features --features training --exam
 在 `rm_vision_rl` 根目录手动查看检查点，或重新播放已有数据：
 
 ```bash
-artifacts/venv/bin/python -m rmvision_rl.training.view \
+artifacts/venv/bin/python -m tools.training.view \
   --checkpoint artifacts/training/static-front-v1/final.zip
-artifacts/venv/bin/python -m rmvision_rl.training.view \
+artifacts/venv/bin/python -m tools.training.view \
   --replay artifacts/training/static-front-v1/evaluation/eval-XXXX/replay.json
 ```
 
@@ -218,9 +287,97 @@ artifacts/venv/bin/python -m rmvision_rl.training.view \
 选择 0.25、0.5、1、2 倍速，`R` 从头重播。末帧会保留，关闭窗口退出。黄色线段是采样轨迹，
 红色标记表示该机器人受到伤害，并非精确撞击点。回放不推进物理，变速和重播不会改变计分。
 
-训练和查看命令均可用 `--viewer-binary PATH` 指定回放程序。无图形会话或程序缺失时保留数据并
-打印打开命令；推理或显示失败单独报错，已完成的训练和模型不受影响。中断/失败的训练不自动
-查看；评估故障不发布完整回放文件，进程日志留在该次评估目录供定位问题。
+分析和查看命令均可用 `--viewer-binary PATH` 指定回放程序。单模型查看命令还支持
+`--label TEXT` 设置窗口及 HUD 标签。修改后需重新构建 `training_preview`，以支持角色标签。
+无图形会话、浏览器不可用或程序缺失时保留数据，打印报告路径及回放打开命令；推理或显示
+失败单独报错，已完成的训练和模型不受影响。分析工具只接受已完成的训练目录；评估故障不发布
+完整回放文件，进程日志留在该次评估目录供定位问题。
+
+### PPO 奖励学习信号诊断
+
+检查已有模型的“命中奖励 → GAE 优势 → PPO 更新 → 发射概率变化”：
+
+```bash
+artifacts/venv/bin/python -m tools.training.diagnose \
+  --checkpoint artifacts/training/static-front-v1/final.zip --rollouts 3
+```
+
+`--checkpoint` 必填；`--rollouts` 默认为 3，按保存的 `n_steps` 执行完整采样与更新。
+支持 `--device` 与 `--output-dir DIR`（独立会话目录的父目录）。默认产物在
+`artifacts/diagnostics/diagnose-*/`。无需图形环境；结束后打印本地 `report.html` 路径，
+可手动用浏览器打开，图表脚本内嵌，支持离线悬停、缩放和图例切换。
+
+诊断从检查点快照恢复权重、优化器及固定场景配置，并从新回合开始；不会重建此前训练的随机数
+或物理现场。沿用原奖励、掩码、回合上限和 PPO 参数，不强制发射，不运行选优／回放，不覆盖
+原模型或发布 `best.zip`、`latest.zip`。没有命中时也不自动增加预算。
+
+主要产物：
+
+- `run.json`：生效配置、原模型摘要、运行状态、三轮汇总及检查结论。
+- `sampling.jsonl`：即使采样中途失败也保留的原始步骤；`steps.csv`：完成更新后的奖励、优势及概率对照。
+- `minibatches.csv`：实际小批次索引、每次标准化优势、概率比、裁剪是否生效及是否执行优化步骤。
+- `rollout-*.npz`：观测、缓冲区、bootstrap 值、独立重算优势及逐个移除奖励的贡献矩阵；
+  `update-*.npz`：同一观测／掩码上的更新后概率与价值预测。
+- `events.jsonl`：自动重置前读取的物理请求、出膛、伤害事件及请求／弹丸编号关联；
+  `event-associations.jsonl` 再通过桥接命令的精确时间戳关联到 Gym 动作，不使用时间邻近猜测。
+- `parity.json`：首轮同一缓冲区、相同权重／优化器／随机数状态下，有无跟踪的对照；不额外采样环境。
+- `report.html`、环境及 PPO 日志；`source.zip` 是本次只读来源的完整快照，不是更新后的模型。
+
+报告将 Gym 原始奖励与时间截断的价值补偿分开显示。奖励移除只在数据副本上进行，保持状态、
+价值预测与回合边界不变；它验证数值传播，不代表“不发射时”的环境反事实。正优势样本也不保证
+整轮更新后该动作概率一定增加；需结合全部样本、实际小批次标准化和裁剪一起判断。
+解释方差的目标方差为零时显示暂无数据。未完成回合不追加尾部结算，回合末在途弹丸单独计数。
+
+正常关闭、Ctrl+C、SIGTERM 或环境异常均清理所属进程；故障保留已完成记录并标注状态，不保存
+部分更新为有效模型。首轮一致性对照失败时停止后续采样。针对性数值及更新一致性检查：
+
+```bash
+artifacts/venv/bin/python -m unittest discover -s tests -p test_diagnose.py -v
+```
+
+### 手动发射与 Gym 奖励调试
+
+手动窗口复用真实 PPO Gym 环境。视觉自动跟踪／瞄准，用户控制连续发射与暂停，不加载策略，
+不训练模型。先按上文重新构建 `training_preview`，然后在 `rm_vision_rl` 根目录启动：
+
+```bash
+artifacts/venv/bin/python -m tools.training.manual
+# 使用已有模型保存的环境配置与契约，不执行模型推理
+artifacts/venv/bin/python -m tools.training.manual \
+  --checkpoint artifacts/training/static-front-v1/final.zip
+# 显式延长回合；窗口和运行记录会标注覆盖值
+artifacts/venv/bin/python -m tools.training.manual \
+  --config config/training/static_fire_ppo.json --episode-steps 1000
+```
+
+`--config` 与 `--checkpoint` 互斥，省略时使用默认训练配置。`--checkpoint` 先验证原环境／观测
+契约，再应用可选的 `--episode-steps`；环境或视觉配置指纹变化仍拒绝运行。
+`--output-dir DIR` 指定独立会话目录的父目录，`--viewer-binary PATH` 指定查看器。
+需要图形桌面；无图形环境、查看器缺失或版本不支持手动模式时，不启动仿真进程。
+
+| 按键 | 行为 |
+| --- | --- |
+| 按住 `F` | 每个环境步持续请求发射；松开停止请求，继续自动跟踪 |
+| `Space` | 暂停／继续；暂停时 F 不推进时间，也不积攒请求 |
+| `R` | 重置同一场景、重新禁射预热，清零奖励，预热完成后自动运行 |
+| `C`、方向键、`PageUp/PageDown` | 切换相机、环绕及缩放 |
+
+预热完成后默认按正常仿真速度连续运行，无需按键推进时间；原 N／F 单步操作已移除。
+按住 F 时每一步都请求发射，松开后下一步恢复跟踪；只有一个在途环境操作，不排队保存发射。
+暂停后已提交的一步允许完成；暂停期间按 F 不推进环境。重置最多保留一个待处理请求，忙时
+不会重复排队。每步仍为 10 ms，计算不足时放慢，不跳过物理步骤。
+
+HUD 的 `Step reward` 是最近一步原始 Gym 奖励，`Total reward` 是当前回合逐步奖励之和，
+`Last nonzero` 保留最近一次非零奖励和步数。它们不包含价值自举或独立评估尾部结算。
+奖励发生在实际命中的步骤，不一定是按下 F 的步骤；松开 F 后继续运行即可观察在途弹丸命中。
+窗口还分别显示当前掩码、上次动作是否被屏蔽、发射请求、请求接受情况、
+实际出膛数及已有拒绝原因。掩码禁止时仍沿用 Gym 的跟踪替代行为，不会绕过机械或裁判限制；
+持续按住 F 时下一步重新请求，松开后不补发已被屏蔽的请求。回合结束冻结显示，等待 R，不自动重置或追加结算。
+
+默认产物在 `artifacts/manual/manual-*/`：`run.json` 保存配置、覆盖值和状态，`steps.csv`
+逐步记录动作、掩码、请求接受情况、出膛数及奖励，`episodes.monitor.csv` 记录完整回合，
+另保存查看器和环境进程日志；不默认录制完整画面。异常时保留最后画面并标记 `FAULT`，
+物理进程停止，不自动重试发射。关闭窗口、Ctrl+C 或 SIGTERM 清理该会话拥有的全部进程。
 
 ## 4. 手动运行底层物理环境
 
@@ -241,7 +398,7 @@ cargo run --offline --no-default-features --features training \
 ```bash
 cd /home/dgx_spark/RM_VISION_WORKSPACE/rm_vision_rl
 python3 - <<'PYCODE'
-from rmvision_rl.transport.client import TrainingClient
+from src.transport.client import TrainingClient
 
 client = TrainingClient('/tmp/rm-rl-manual-XXXXXXXX/training.sock')
 try:
@@ -268,9 +425,9 @@ python3 - <<'PYCODE'
 import json
 import tempfile
 from pathlib import Path
-from rmvision_rl.transport.processes import training_worker
-from rmvision_rl.transport.vision_bridge import vision_worker
-from rmvision_rl.environment.evaluation import EvaluationConfig, EvaluationSession
+from src.transport.processes import training_worker
+from src.transport.vision_bridge import vision_worker
+from src.environment.evaluation import EvaluationConfig, EvaluationSession
 
 root = Path.cwd()
 sim = root.parent / 'rm_simulator_2027'
@@ -315,7 +472,7 @@ session = EvaluationSession(
 这个回调只跟踪、不申请射击，不会学习。`fire_only` 模式由规则策略选板，回调在当前槽位的 TRACK/FIRE 间选择。需要编码后的短历史时使用：
 
 ```python
-from rmvision_rl.policy.observations import TensorPolicy
+from src.policy.observations import TensorPolicy
 
 def actor(value):
     # value 包含 features、valid、action_mask 和 version。
@@ -329,19 +486,26 @@ session = EvaluationSession(
 
 动作和数据语义见[接口说明](interfaces.md)。
 
-## 配置工具现状
+## 视觉配置
 
-`tools/config/prepare_vision_profile.py` 仍导入已删除的 `tools.validation.validate.require`，当前不能运行，包括 `--help`。此问题不影响上面的默认配置示例；修复前不要将该工具作为运行前置条件。
+运行读取的是传给 `vision_worker` 的目录下 `src/config/modules/`，MPC 求解迭代上限位于
+`gimbal_trajectory_planner.yaml` 的 `max_iterations`。需要实验配置时可手动准备副本，
+将副本根目录作为 `vision_root`，并记录实际配置。
 
-`config/policy/mpc-recovery.json` 定义将单次求解上限从 50 调整为 200 的候选配置，不会自动生效。运行读取的是传给 `vision_worker` 的目录下 `src/config/modules/`。使用配置副本时，用副本根目录替换示例中的 `vision`，并记录实际配置。
+`config/policy/mpc-recovery.json` 保留为 50 → 200 次迭代的候选参数记录，不会被运行库自动加载；
+本项目不再提供配置副本生成工具。修改实际视觉配置可能导致旧检查点的配置指纹校验失败。
 
 ## 常见问题
 
+2026-09-13 修复了连发吞吐偏低的两个环境问题：机械冷却误用低频裁判快照，以及合成检测将经过视线的小弹丸判为整块装甲不可见。更新后重新构建 `daedalus_training`，重启已有手动窗口/环境进程；仅更新 Python 无法修复旧仿真二进制的视觉行为。手动、Gym 和规则评估共用修复后的环境。射速限制、奖励和物理命中结算未放宽。
+
+旧检查点可以继续加载，网络维度和配置格式兼容，但修复前后的运行环境行为不同，历史分数不能视为同一实现上的复现。现有配置指纹不包含源码/二进制摘要，比较时应另外记录运行版本；修复本身不会让旧 PPO 权重自动学会持续发射。5 秒 Gym 奖励只计关窗前伤害，独立评估还会结算窗口内射出但尚未命中的弹丸，比较时须区分两种口径。
+
 | 现象 | 处理方向 |
 | --- | --- |
-| 训练期间没有画面 | 训练过程无渲染；正常结束后默认自动评估并回放，也可用 `training.view --checkpoint` 手动查看 |
+| 训练期间没有画面 | 训练过程无渲染；运行 `tools.training.analysis` 分析并显示结果，或用 `tools.training.view --checkpoint` 查看单个模型 |
 | 找不到 Bevy/Rust 动态库 | 使用 `cargo run` 或 `training_worker`，保留匹配工具链和 `deps/` |
-| `No module named rmvision_rl` | 从本仓库根目录执行 |
+| `No module named src` | 从本仓库根目录执行 |
 | 缺少桥接二进制 | 完成 CMake 构建，核对输出路径 |
 | 预热超时或长期无有效命令 | 检查场景、测量、跟踪及 MPC 配置；保留超时，不静默重复抽样 |
 | 找不到旧验收命令 | 历史工具已删除，使用本文运行库示例 |

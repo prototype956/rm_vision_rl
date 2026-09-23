@@ -14,7 +14,11 @@
 | `close()` | 关闭实例 |
 | `connect()` / `retry_pending()` | 连接并重取未确认请求，不生成新动作编号 |
 
-响应含 `ok`、关联编号、`sim_time_ns` 和 `data`。data 中 `feedback`、`self_referee`、`visual_frames` 用于控制；`evaluation`、`events`、`reward_damage` 用于独立统计。Reset 的 `previous_round` 是旧回合截断摘要，不是新回合奖励。
+响应含 `ok`、关联编号、`sim_time_ns` 和 `data`。data 中 `feedback`、`self_referee`、`self_weapon`、`visual_frames` 用于控制；`evaluation`、`events`、`reward_damage` 用于独立统计。Reset 的 `previous_round` 是旧回合截断摘要，不是新回合奖励。
+
+`self_weapon` v1 含 `version`、`valid`、`sample_ns` 和 `fire_blocks`，每物理步更新，只允许自身机械间隔（bit 5）、供弹忙（bit 6）和枪口无效（bit 7）。Python 桥接用该通道替换裁判快照的对应位，再交给 C++；生命、热锁、弹量及裁判样本时间保持原口径。武器反馈无效、来自未来或超过 10 ms 时禁止发射，格式/版本错误直接报错。不含该字段的旧仿真器沿用旧的保守处理。该组合不读取 `evaluation`，不改变网络观测维度或策略动作接口。
+
+合成视觉的结构遮挡仍检查装甲中心和四角，但排除弹丸碰撞体。短时遮住一个采样点的小弹丸不应被等价为整块装甲消失；墙体、地形和机器人结构仍参与遮挡，弹丸物理碰撞、CCD 与伤害计算保持不变。这是合成检测近似，不是像素级遮挡模型。
 
 角度遵循视觉 ROS 约定，单位 rad，正 pitch 向上；距离单位 m。`fire` 是脉冲电平，持续高电平不等于连续单发请求。接收命令不等于实际出膛，以 `shot_fired` 事件为准。
 
@@ -32,6 +36,7 @@
 | `gimbal_yaw_rad` / `gimbal_pitch_rad` | 初始云台角，俯仰受机械限位约束 |
 | `motion` | 下表中的目标运动 |
 | `target_hp` | 可选血量覆盖，1–1,000,000 |
+| `unlimited_heat` | 布尔值，默认 false；true 禁用双方热量累积及热量锁定，机械约束仍生效 |
 | `measurements` | 合成测量配置；底层 Reset 默认关闭，预热/评估会话自动启用 |
 
 | motion 示例 | 行为 |
@@ -69,9 +74,9 @@ idle → warming → evaluating → settling → complete
 `controlled_dead` 和 `target_destroyed`；真正终止优先于同时到达的时间上限。提前结束仍使用
 实际结束时间作为出膛归属的右开边界。
 
-模型回放入口 `training.view.evaluate_checkpoint(checkpoint, device=None, output_dir=None)` 返回
+模型回放入口 `tools.training.view.evaluate_checkpoint(checkpoint, device=None, output_dir=None)` 返回
 完整回放文件路径。它复用 `StaticFirePolicy` 与 Gym 的二动作编码，并使用相同 Gym RNG 派生
-出生种子；通过已有模型加载器检查兼容性。`training.view.open_replay(path, viewer_binary=None)`
+出生种子；通过已有模型加载器检查兼容性。`tools.training.view.open_replay(path, viewer_binary=None)`
 只启动显示进程，缺少图形环境或程序时返回 `False` 并保留文件。
 
 `replay.json` 当前 `version=1`：头部包含 `model`、`fingerprints`、`render` 路径、`scene_seed`、
@@ -82,8 +87,8 @@ idle → warming → evaluating → settling → complete
 
 ## 静止靶 Gymnasium
 
-安装依赖并 `import rmvision_rl` 后，用 `gymnasium.make('RMStaticFire-v0')` 创建环境，
-也可直接导入 `rmvision_rl.environment.static_fire.StaticFireEnv`。
+安装依赖并 `import src` 后，用 `gymnasium.make('RMStaticFire-v0')` 创建环境，
+也可直接导入 `src.environment.static_fire.StaticFireEnv`。
 构造参数为 `simulator_root`、`vision_root`、`simulator_binary`、`bridge_binary`、
 `simulator_config`、`log_dir`、`episode_steps=3000`、`warmup_config=None`、`render_mode=None`。
 路径默认使用当前仓库及相邻的 `rm_simulator_2027`、`rm_vision_2027`，仿真二进制默认 Release。
@@ -128,7 +133,7 @@ episode_steps 返回 truncated，二者相遇以真正终止为准。末观测�
 
 ## PPO 配置与检查点
 
-训练入口为 `python -m rmvision_rl.training.train`，默认读取
+训练入口为 `python -m src.training.train`，默认读取
 `config/training/static_fire_ppo.json`。配置包含版本、算法/策略类型、PPO seed、device、
 torch_threads、total_timesteps、checkpoint_updates、environment 和 ppo。
 仅支持 `maskable_ppo/mlp`；`ppo.net_arch` 分别配置 Actor 的 pi 和 Critic 的 vf 层宽，
@@ -136,6 +141,8 @@ torch_threads、total_timesteps、checkpoint_updates、environment 和 ppo。
 
 environment 包含 episode_steps、scene_seed、scenario，并可配置 Gym 的五个路径参数
 simulator_root、vision_root、simulator_binary、bridge_binary、simulator_config。
+可选 `environment.decision_clock` 包含 `min_interval_ms`、`max_interval_ms`、`resample`、`seed` 四个必需字段。
+区间端点为 10 ms 的整数倍，支持 10–60000 ms 且最小值不大于最大值；`resample` 为 `decision`（每次机会后采样）或 `episode`（每回合采样一个周期），seed 为独立的 32 位非负整数。省略整个对象表示关闭，保留旧动作契约。
 场景与模型 seed 独立；训练包装器忽略 SB3 的环境播种请求，每次 Reset 重用固定场景 seed。
 `--config` 和 `--resume` 互斥；恢复不接受 `--seed`，只允许覆盖 device、追加 timesteps 和新输出目录。
 
@@ -170,7 +177,7 @@ C++ 在同周期发送观测并等待动作，然后完成控制计算。前置�
 
 语义回调主要接收 `estimate`、`feedback`、`referee`、四个 `candidates`、数据年龄、上次槽位、距请求时间和 `action_mask`。实际字段以 [policy_wire.cpp](../native/vision_bridge/policy_wire.cpp) 为准。
 
-[observations.py](../rmvision_rl/policy/observations.py) 显式选择字段，按 [v1.json](../config/observations/v1.json) 顺序编码，不展开整个诊断对象。
+[observations.py](../src/policy/observations.py) 显式选择字段，按 [v1.json](../config/observations/v1.json) 顺序编码，不展开整个诊断对象。
 
 | 输出 | 约定 |
 | --- | --- |
@@ -180,6 +187,18 @@ C++ 在同周期发送观测并等待动作，然后完成控制计算。前置�
 | `action_mask` | 9 个布尔值 |
 
 `TensorPolicy` 给 actor 的数据是普通 Python 列表，不是 NumPy/PyTorch 张量。每个控制步推进历史；无语义回调时该行保持零和 valid=false。回合 Reset 清空历史；桥接按目标代次变化通知历史复位，代次不进入 actor 输入。actor 接收副本，不能修改后续周期历史。Gym 再将这些数值转换为上述 NumPy 数组及二动作掩码。
+
+## 随机射击决策时钟
+
+`StaticFirePolicy` 和 Gym 可启用独立决策时钟。预热完成后第 0 个控制步为首次机会；每个到期机会执行完一个 10 ms 步后，从闭区间内的离散步数等概率抽取下一间隔。抽样不接收策略动作，TRACK、物理禁射、无回调/LOST 都会消耗该机会，不排队补发。非到期步只允许 TRACK；已有脉冲和在途命令仍由原火控处理。计时只随成功完成的物理步前进，读取观测、暂停、目标代次/历史复位均不改变时钟。
+
+启用时，Gym 二动作观测额外含 `decision_clock: float32[5]`，依次为是否到期、距下次机会的秒数、最小间隔秒数、最大间隔秒数、每回合固定周期秒数（逐次采样模式为 0）；不含真实目标状态或命中信息。基础 8×90 特征保持不变。检查点 `action_version=2` 并记录时钟特征契约，配置指纹包括区间、种子和采样方式，不能在旧无时钟权重上静默开启。
+
+独立 RNG 使用配置 seed 与回合流编号派生：同一环境的成功回合依次使用流 0、1、2……，即使固定场景 Reset 也不会重复同一时钟流。几何拒绝重试和预热不消耗时钟流。新环境/恢复训练从流 0 开始；独立模型评估也从流 0 开始，使同配置候选共享相同时间表。`StaticFirePolicy` 的调用方应在预热结束调用 `clock.start_episode()`，每个实际完成的控制步调用 `clock.complete_step()`；标准 Gym 与 `EvaluationSession` 已负责此流程，调用者不应重复推进。
+
+`info.decision_clock_before` 对应刚提交的动作，`info.decision_clock` 对应返回观测；`physical_fire_legal_before` 区分原火控合法性，`clock_masked` 标识被时钟屏蔽的手动请求。环境日志 `env-*/decision-clock.jsonl` 逐次记录机会、动作、抽样间隔及接受结果。独立评估每步在 vision 结果内记录时钟前后状态，回放记录保存配置和时钟状态。原生 `rule` 无策略基线仍不加时钟；对照随机时钟下的始终发射基线应使用带同配置时钟的 `StaticFirePolicy`，选择当前合法的 FIRE。
+
+该功能随机化决策间隔，不随机化机械冷却、命令/视觉延迟；尚不构成跨车辆时序的完整域随机化。Gym 步长、gamma/GAE、奖励口径和回合长度均保持原样。
 
 ## 奖励与评估分数
 

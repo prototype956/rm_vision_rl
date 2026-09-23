@@ -26,17 +26,17 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 
 | 文件 | 作用 |
 | --- | --- |
-| [transport/client.py](../rmvision_rl/transport/client.py) | `TrainingClient`：仿真协议、请求/回合/步编号及未确认请求重取 |
-| [transport/processes.py](../rmvision_rl/transport/processes.py) | `training_worker`：启动仿真进程，分配独立 socket，设置动态库路径并回收进程 |
-| [transport/vision_bridge.py](../rmvision_rl/transport/vision_bridge.py) | `VisionBridge` / `vision_worker`：桥接通信、策略询问、动作与发布确认 |
-| [environment/warmup.py](../rmvision_rl/environment/warmup.py) | `WarmupSession`：禁射搜索、连续新帧确认、就绪或超时 |
-| [environment/evaluation.py](../rmvision_rl/environment/evaluation.py) | `EvaluationSession`：预热、正式窗口和尾部结算生命周期 |
-| [environment/static_fire.py](../rmvision_rl/environment/static_fire.py) | `StaticFireEnv`：规则选板、二动作 Gym 采样、时间截断和独立进程生命周期 |
-| [training/environment.py](../rmvision_rl/training/environment.py) | 固定场景适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
-| [training/models.py](../rmvision_rl/training/models.py) | 模型构建/加载、观测契约及配置指纹、原子检查点 |
-| [training/train.py](../rmvision_rl/training/train.py) | 训练预算、完整更新、日志、周期保存和运行生命周期 |
-| [policy/observations.py](../rmvision_rl/policy/observations.py) | `encode` / `TensorPolicy`：语义字段编码、8 个控制周期的历史和有效性标记 |
-| [scoring/window.py](../rmvision_rl/scoring/window.py) | `WindowScore`：关联实际出膛与弹丸结果，计算窗口归属伤害 |
+| [transport/client.py](../src/transport/client.py) | `TrainingClient`：仿真协议、请求/回合/步编号及未确认请求重取 |
+| [transport/processes.py](../src/transport/processes.py) | `training_worker`：启动仿真进程，分配独立 socket，设置动态库路径并回收进程 |
+| [transport/vision_bridge.py](../src/transport/vision_bridge.py) | `VisionBridge` / `vision_worker`：桥接通信、策略询问、动作与发布确认 |
+| [environment/warmup.py](../src/environment/warmup.py) | `WarmupSession`：禁射搜索、连续新帧确认、就绪或超时 |
+| [environment/evaluation.py](../src/environment/evaluation.py) | `EvaluationSession`：预热、正式窗口和尾部结算生命周期 |
+| [environment/static_fire.py](../src/environment/static_fire.py) | `StaticFireEnv`：规则选板、二动作 Gym 采样、时间截断和独立进程生命周期 |
+| [training/environment.py](../src/training/environment.py) | 固定场景适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
+| [training/models.py](../src/training/models.py) | 模型构建/加载、观测契约及配置指纹、原子检查点 |
+| [training/train.py](../src/training/train.py) | 训练预算、完整更新、日志、周期保存和运行生命周期 |
+| [policy/observations.py](../src/policy/observations.py) | `encode` / `TensorPolicy`：语义字段编码、8 个控制周期的历史和有效性标记 |
+| [scoring/window.py](../src/scoring/window.py) | `WindowScore`：关联实际出膛与弹丸结果，计算窗口归属伤害 |
 
 `EvaluationSession` 接管仿真和桥接后，不应再从外部单独调用它们的步进接口，以免破坏控制、发布确认和计分时序。
 
@@ -67,6 +67,20 @@ clip 参数没有分段调度问题。更新结束后才记录损失并允许保
 这些能力应放在训练/策略层，新增独立的模型与训练实现；当前不提供空的 GRU 类。
 检查点的策略类型和观测契约用于阻止不兼容加载。
 
+## 分析与验证工具
+
+`tools/training/` 单向依赖运行库和训练接口；`src/training/` 保留配置、环境包装、
+模型管理与 PPO 入口，不导入工具。训练结束后按需独立执行分析，训练命令不自动启动评估或窗口。
+
+| 文件 | 作用 |
+| --- | --- |
+| [tools/training/analysis.py](../tools/training/analysis.py) | 训练结束后的检查点评估、最佳模型选优、独立分析产物及双窗口编排 |
+| [tools/training/report.py](../tools/training/report.py) | 从日志和评估结果生成离线交互曲线与模型对比报告 |
+| [tools/training/view.py](../tools/training/view.py) | 单模型确定性评估、真值回放记录及单／多回放进程管理 |
+| [tools/training/manual.py](../tools/training/manual.py) | 原生窗口 JSONL 操作、手动 Gym 步进、原始奖励日志及进程清理 |
+| [tools/training/diagnose.py](../tools/training/diagnose.py) | 短期 PPO 更新的学习信号诊断 |
+| [tools/training/diagnostic_report.py](../tools/training/diagnostic_report.py) | 诊断数据关联与可视化报告 |
+
 ## C++ 桥接
 
 | 文件 | 作用 |
@@ -82,13 +96,17 @@ clip 参数没有分段调度问题。更新结束后才记录损失并允许保
 | 子系统 | 当前节拍 |
 | --- | --- |
 | 控制与 Advance | 10 ms / 100 Hz |
+| PPO 新训练射击决策 | 默认随机 50–100 ms，独立时钟门控；原控制步不变 |
 | 物理 | 默认 1 ms、2 子步；训练入口支持 0.5/1/2 ms |
 | 云台积分 | 最多 1 ms 积分间隔 |
 | 合成检测 | 30 Hz，按物理步边界采样 |
 | 自身裁判 | 10 Hz，包含独立采样时间 |
+| 自身武器机械状态 | 每物理步更新，每控制步读取；独立于裁判采样 |
 
 训练推进使用仿真时间；等待 Python 策略时世界不继续演化。资产加载和通信超时仍使用宿主机时间。反馈合成时间戳为 `10^18 + 回合仿真纳秒`，不能当作真实日期。控制会复用最近估计，没有新检测帧时不重复更新预测器。
 
 策略输入来自目标估计、自身反馈和自身裁判数据。种子、实验倒计时、真实目标状态、实际伤害和完整事件账本不送给策略。`EvaluationSession.advance()` 的完整返回对象包含评估真值，不能整体作为网络输入。
+
+Python 仅合并自身武器通道的机械间隔、供弹忙和枪口无效三个位，避免把 50 ms 的机械冷却锁在 100 ms 裁判采样周期里。热量、生命和弹量继续使用裁判快照；物理后端仍最终裁决每次出膛。合成检测的整板可见性测试排除小弹丸，防止开火本身造成系统性的虚假暂时丢失。
 
 当前己方底盘固定，目标支持静止、正弦平移或匀速旋转。合成观测的几何可见性近似不等价于真实渲染检测结果，限制见[当前状态](development.md)。

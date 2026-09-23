@@ -1,4 +1,4 @@
-"""Evaluate one checkpoint, then replay recorded truth without running another physical world."""
+"""评估单个检查点并记录真值，显示阶段直接播放记录，不再运行物理世界。"""
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -33,19 +33,19 @@ def _atomic_json(path, value):
 
 
 def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
-    # Replay-only use does not import PyTorch or require training dependencies.
+    # 仅播放已有回放时延迟加载训练模块，避免依赖 PyTorch。
     from gymnasium.utils.seeding import np_random
-    from rmvision_rl.environment.evaluation import EvaluationConfig, EvaluationSession
-    from rmvision_rl.environment.spawn import reset_spawn
-    from rmvision_rl.policy.static_fire import StaticFirePolicy
-    from rmvision_rl.training.environment import make_environment
-    from rmvision_rl.training.models import load_model, read_checkpoint_metadata
-    from rmvision_rl.transport.processes import training_worker
-    from rmvision_rl.transport.vision_bridge import vision_worker
+    from src.environment.evaluation import EvaluationConfig, EvaluationSession
+    from src.environment.spawn import reset_spawn
+    from src.policy.static_fire import StaticFirePolicy
+    from src.training.environment import make_environment
+    from src.training.models import load_model, read_checkpoint_metadata
+    from src.transport.processes import training_worker
+    from src.transport.vision_bridge import vision_worker
 
     checkpoint = Path(checkpoint).resolve()
-    # latest.zip may be atomically replaced by a training task during evaluation.
-    # Bind metadata, loaded weights and replay identity to one immutable byte snapshot.
+    # 评估期间，训练任务可能原子替换 latest.zip。
+    # 使用固定字节副本，使元数据、加载权重和回放标识保持一致。
     checkpoint_data = checkpoint.read_bytes()
     metadata = read_checkpoint_metadata(BytesIO(checkpoint_data))
     config = metadata["config"]
@@ -57,7 +57,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
     frames, attempts = [], []
     raw_damage = 0.0
     with ExitStack() as stack:
-        # This unstarted environment supplies the same strict checkpoint contract as training.
+        # 用尚未启动的环境生成与训练一致的检查点契约。
         env = make_environment(config, output / "environment")
         stack.callback(env.close)
         model, metadata = load_model(BytesIO(checkpoint_data), env, device=device)
@@ -72,7 +72,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
                                       action_masks=obs["action_mask"].astype(bool, copy=True))
             return int(action.item())
 
-        policy = StaticFirePolicy(predict)
+        policy = StaticFirePolicy(predict, decision_clock=settings.get("decision_clock"))
         session = EvaluationSession(client, bridge, evaluation_config,
                                     policy=policy, policy_mode="fire_only")
         rng, _ = np_random(settings["scene_seed"])
@@ -95,6 +95,8 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
                 "settlement_time_ns": stats["settlement_time_ns"] or 0,
                 "end_reason": session.end_reason,
             }
+            if policy.clock.enabled:
+                metrics["decision_clock"] = policy.clock.info()
             snapshot = {
                 "time_ns": response["sim_time_ns"], "phase": session.status,
                 "metrics": metrics,
@@ -106,7 +108,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
                 },
             }
             if frames and frames[-1]["time_ns"] == snapshot["time_ns"]:
-                # EndWindow has no physical step. Keep its events on the final physical frame.
+                # EndWindow 不推进物理，将其事件合并到相同时间戳的最后一帧。
                 previous = frames.pop()["data"]["events"]
                 unique = {e["event_id"]: e for e in previous + data["events"]}
                 snapshot["data"]["events"] = list(unique.values())
@@ -144,6 +146,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
             "render": {"simulator_root": str(base.simulator_root),
                        "config": str(base.simulator_config), "assets": str(base.simulator_root / "assets")},
             "scene_seed": settings["scene_seed"], "reset_attempts": attempts,
+            "decision_clock": settings.get("decision_clock"),
             "scenario": initial_scene, "step_ns": 10_000_000,
             "summary": {"status": session.status, "end_reason": session.end_reason,
                         "raw_damage": raw_damage, "score": score,
@@ -151,7 +154,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
                         if score["eligible_shots"] else None},
             "frames": frames,
         }
-    # Publish only after inference AND both worker shutdowns succeeded.
+    # 仅在推理完成且仿真与桥接进程均成功退出后写出回放。
     path = output / "replay.json"
     _atomic_json(path, record)
     rate = record["summary"]["hit_rate"]
@@ -162,7 +165,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
     return path
 
 
-def open_replay(path, *, viewer_binary=None):
+def _start_replay(path, *, viewer_binary=None, label=None):
     path = Path(path).resolve()
     with path.open() as file:
         replay = json.load(file)
@@ -172,15 +175,18 @@ def open_replay(path, *, viewer_binary=None):
     root = Path(render["simulator_root"])
     binary = Path(viewer_binary).resolve() if viewer_binary else root / "target/release/examples/training_preview"
     command = [str(binary), "--replay", str(path), "--config", render["config"], "--assets", render["assets"]]
-    manual = f"python -m rmvision_rl.training.view --replay {shlex.quote(str(path))}"
+    manual = f"python -m tools.training.view --replay {shlex.quote(str(path))}"
+    if label:
+        command += ["--label", label]
+        manual += f" --label {shlex.quote(label)}"
     if viewer_binary:
         manual += f" --viewer-binary {shlex.quote(str(binary))}"
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         print(f"No graphical session; replay retained. Open on the desktop:\n{manual}", flush=True)
-        return False
+        return None
     if not binary.is_file():
         print(f"Replay viewer unavailable: {binary}\nBuild training_preview, then run:\n{manual}", flush=True)
-        return False
+        return None
     digest = hashlib.sha256(Path(render["config"]).read_bytes()).hexdigest()
     if digest != replay["fingerprints"]["simulator_config"]:
         raise ValueError("simulator config differs from the recorded replay; restore it before viewing")
@@ -189,19 +195,45 @@ def open_replay(path, *, viewer_binary=None):
     rustlib = subprocess.check_output(["rustc", "--print", "target-libdir"], text=True).strip()
     env["LD_LIBRARY_PATH"] = ":".join([str(binary.parent / "deps"), str(binary.parent.parent / "deps"),
                                         str(Path(sysroot) / "lib"), rustlib, env.get("LD_LIBRARY_PATH", "")])
-    process = subprocess.Popen(command, cwd=root, env=env)
+    return subprocess.Popen(command, cwd=root, env=env)
+
+
+def open_replays(replays, *, viewer_binary=None):
+    """先启动所有回放窗口，再等待退出；关闭一个窗口不影响其他窗口。
+
+    收集普通启动或退出错误，使其他有效回放仍可打开。
+    收到中断时先回收本函数拥有的全部进程，再向上抛出中断。
+    """
+    processes, errors = [], []
     try:
-        if process.wait() != 0:
-            raise RuntimeError(f"replay viewer failed; replay retained at {path}")
+        for path, label in replays:
+            try:
+                process = _start_replay(path, viewer_binary=viewer_binary, label=label)
+                if process is not None:
+                    processes.append((process, path))
+            except Exception as error:
+                errors.append(f"{path}: {type(error).__name__}: {error}")
+                print(f"Replay launch failed: {errors[-1]}", flush=True)
+        for process, path in processes:
+            if process.wait() != 0:
+                errors.append(f"replay viewer failed; replay retained at {path}")
     finally:
-        if process.poll() is None:
-            process.terminate()
+        for process, _ in processes:
+            if process.poll() is None:
+                process.terminate()
+        for process, _ in processes:
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-    return True
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    return bool(processes)
+
+
+def open_replay(path, *, viewer_binary=None, label=None):
+    return open_replays([(path, label)], viewer_binary=viewer_binary)
 
 
 def main():
@@ -212,6 +244,7 @@ def main():
     parser.add_argument("--device", help="inference device; default from checkpoint")
     parser.add_argument("--output-dir", type=Path, help="parent directory for a new evaluation run")
     parser.add_argument("--viewer-binary", type=Path)
+    parser.add_argument("--label", help="optional window/HUD label")
     args = parser.parse_args()
     if args.replay and (args.device is not None or args.output_dir is not None):
         parser.error("--device and --output-dir apply only to --checkpoint")
@@ -222,7 +255,7 @@ def main():
     previous = signal.signal(signal.SIGTERM, stop)
     try:
         path = args.replay or evaluate_checkpoint(args.checkpoint, device=args.device, output_dir=args.output_dir)
-        open_replay(path, viewer_binary=args.viewer_binary)
+        open_replay(path, viewer_binary=args.viewer_binary, label=args.label)
     finally:
         signal.signal(signal.SIGTERM, previous)
 
