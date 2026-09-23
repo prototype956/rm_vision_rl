@@ -30,6 +30,16 @@ class WindowScore:
     def invalidate(self, reason):
         self.status, self.error = "invalid", str(reason)
 
+    def shorten(self, end_ns):
+        """A physical death closes the window early, retaining the exclusive launch cutoff."""
+        end_ns = integer(end_ns, "end_ns", self.start_ns + 1)
+        if self.closed or self.status != "collecting" or end_ns > self.end_ns:
+            raise ValueError("cannot shorten this evaluation window")
+        self.end_ns = end_ns
+        for shot in self.shots.values():
+            if shot["classification"] == "eligible" and shot["launched_at_ns"] >= end_ns:
+                shot["classification"] = "at_or_after_end"
+
     def ingest(self, response):
         if self.status == "invalid":
             raise RuntimeError("score ledger is invalid; start a new round")

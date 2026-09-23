@@ -63,7 +63,90 @@ idle → warming → evaluating → settling → complete
 
 预热默认要求 5 个连续新鲜 tracking 图像帧，最大图像年龄 100 ms，期限 15 s。确认按新图像而不是控制调用次数计数。预热禁射，就绪后保持物理和估计历史连续，单独开始评估计时。
 
-`EvaluationConfig` 默认 `window_ms=30000`、`max_settle_steps=1000`、`target_hp=100000`。这些是评估设置，不是已经完成的 RL 终止/截断设计。
+`EvaluationConfig` 默认 `window_ms=30000`、`max_settle_steps=1000`、`target_hp=100000`。这些仅控制评估会话，Gym 采样使用下节的独立回合边界。
+
+评估中己方死亡或目标被击毁时提前关窗并自然结算。`info.end_reason` 区分 `time_limit`、
+`controlled_dead` 和 `target_destroyed`；真正终止优先于同时到达的时间上限。提前结束仍使用
+实际结束时间作为出膛归属的右开边界。
+
+模型回放入口 `training.view.evaluate_checkpoint(checkpoint, device=None, output_dir=None)` 返回
+完整回放文件路径。它复用 `StaticFirePolicy` 与 Gym 的二动作编码，并使用相同 Gym RNG 派生
+出生种子；通过已有模型加载器检查兼容性。`training.view.open_replay(path, viewer_binary=None)`
+只启动显示进程，缺少图形环境或程序时返回 `False` 并保留文件。
+
+`replay.json` 当前 `version=1`：头部包含 `model`、`fingerprints`、`render` 路径、`scene_seed`、
+`reset_attempts` 和 `scenario`；`frames` 保存每个 10 ms 周期的 `time_ns`、`phase`、`metrics`、
+真实姿态与事件 `data`，`summary` 保存原始伤害与最终 `WindowScore`。不推进时间的关窗事件
+合并进同时间戳的末帧，不重复记录物理周期。真值仅供计分与显示，不进入模型观测。
+`settlement_timed_out` 的回放可查看已有过程，但 `official_damage=null`，不能解释为完整得分。
+
+## 静止靶 Gymnasium
+
+安装依赖并 `import rmvision_rl` 后，用 `gymnasium.make('RMStaticFire-v0')` 创建环境，
+也可直接导入 `rmvision_rl.environment.static_fire.StaticFireEnv`。
+构造参数为 `simulator_root`、`vision_root`、`simulator_binary`、`bridge_binary`、
+`simulator_config`、`log_dir`、`episode_steps=3000`、`warmup_config=None`、`render_mode=None`。
+路径默认使用当前仓库及相邻的 `rm_simulator_2027`、`rm_vision_2027`，仿真二进制默认 Release。
+无渲染模式是唯一支持的渲染设置；用 `episode_steps` 配置时限，勿额外叠加 `TimeLimit`。
+
+| 接口 | 行为 |
+| --- | --- |
+| `reset(seed=None, options=None)` | 返回 `(obs, info)`；启动或复用进程，禁射预热并准备首个决策 |
+| `step(action)` | 返回 `(obs, reward, terminated, truncated, info)`；恰好推进 10 ms |
+| `action_masks()` | 返回当前 `bool[2]` 副本；需处于正式采样状态 |
+| `close()` | 取消未提交周期、释放进程和 socket；可重复调用 |
+
+动作空间 `Discrete(2)`：0 跟踪规则槽位且不新增射击请求；1 在该槽位请求单发。
+无规则槽位时动作 0 映射到底层 WAIT。动作 0 不撤销已接纳脉冲。
+被掩码禁止的动作 1 执行动作 0，`info.action_masked=True`，无额外奖励或惩罚。
+Python/NumPy 整数均支持；bool、浮点和越界动作在物理推进前报错。
+九动作回调接口保持原来的严格检查，不会自动替换非法动作。
+
+`obs` 为 Dict：`features=float32[8,90]`、`valid=int8[8]`、`action_mask=int8[2]`。
+`features` 范围 [-1,1]，后两项为 0/1；每次返回独立数组。没有策略回调的周期填零行且
+valid=false，掩码为 `[1,0]`。Reset 和目标代次变化清空历史，代次仅作为内部复位元数据。
+语义年龄 null 编码为对应归一化上限 1；`since_request_s=null` 表示从未请求，同样编码为 1。
+
+`options` 仅支持 `{'scenario': {...}}`，字段沿用仿真场景接口，但 motion 必须为 static，
+measurements 必须启用。缺省填入距离 4 m、HP 100000、噪声 0.25 px、延迟 20 ms、空检测概率 0。
+其他出生参数仍按仿真种子采样。Gym seed 初始化其随机流，并从中派生仿真 seed；二者不等同。
+几何无效出生最多尝试 32 个派生 seed，使用新请求编号；尝试和拒绝原因在 `info.reset_attempts`。
+预热超时、配置错误及通信故障不会重采样掩盖，而是报错并清理进程；下次 Reset 重新启动。
+
+正式阶段丢失目标继续采样，不重新预热。己方死亡或目标击毁返回 terminated；否则达到
+episode_steps 返回 truncated，二者相遇以真正终止为准。末观测来自旧回合真实末时刻，
+没有提交下一动作或推进下一物理步。结束后 Step 报错，必须 Reset。
+
+奖励为 `float(reward_damage)`，仅计算本次推进实际发生的伤害，不包含预热及 Reset 摘要。
+时间截断不执行尾部结算，Reset 会丢弃旧世界在途弹丸；训练器必须保留末观测并进行
+时间截断价值自举。训练累计奖励不是窗口归属评估分数，不能用末尾结算奖励和自举重复补偿。
+
+`info` 提供 `damage`、`episode_damage`、`actual_shots`、`episode_steps`、`episode_time_s`、
+`physical_time_ns`、`end_reason`、`action`、`action_masked`、`shot_requested`、
+`shot_accepted`、`reject_reason`、`reset_attempts` 和 `warmup`。请求状态对应刚执行的动作，
+返回 obs/mask 对应下一决策周期。info 含实验及评估数据，禁止整体送入网络。
+
+## PPO 配置与检查点
+
+训练入口为 `python -m rmvision_rl.training.train`，默认读取
+`config/training/static_fire_ppo.json`。配置包含版本、算法/策略类型、PPO seed、device、
+torch_threads、total_timesteps、checkpoint_updates、environment 和 ppo。
+仅支持 `maskable_ppo/mlp`；`ppo.net_arch` 分别配置 Actor 的 pi 和 Critic 的 vf 层宽，
+激活函数固定 Tanh；其余初始参数见配置。学习率和 clip 为常数，不支持分段调度。
+
+environment 包含 episode_steps、scene_seed、scenario，并可配置 Gym 的五个路径参数
+simulator_root、vision_root、simulator_binary、bridge_binary、simulator_config。
+场景与模型 seed 独立；训练包装器忽略 SB3 的环境播种请求，每次 Reset 重用固定场景 seed。
+`--config` 和 `--resume` 互斥；恢复不接受 `--seed`，只允许覆盖 device、追加 timesteps 和新输出目录。
+
+模型 ZIP 使用 SB3 格式保存权重、优化器和累计步数，并额外嵌入 `rmvision.json`，将配置、
+观测版本/形状/类型/特征 schema 指纹、两动作语义、环境/视觉配置指纹、依赖版本与完整更新
+次数一起保存。模型构建和加载统一经 `training.models`；加载前检查类型和观测/配置兼容性，
+加载后清空旧观测，由新回合开始采样。不能把旧 MLP 检查点直接当成未来 GRU 检查点。
+
+`run.json` 为运行配置与状态记录；`episodes.monitor.csv` 为原始回合统计，
+`logs/progress.csv` 和 TensorBoard event 为完整更新日志。`latest.zip` 是最近保存的完整
+检查点副本，通过同目录临时文件原子替换；失败或中断不会覆盖为部分更新模型。
 
 ## 策略动作
 
@@ -96,12 +179,12 @@ C++ 在同周期发送观测并等待动作，然后完成控制计算。前置�
 | `valid` | 8 个历史行有效性标记 |
 | `action_mask` | 9 个布尔值 |
 
-`TensorPolicy` 给 actor 的数据是普通 Python 列表，不是 NumPy/PyTorch 张量。每个控制步推进历史；无语义回调时该行保持零和 valid=false。回合 Reset 清空历史；目标代次变化的复位衔接仍需完善。actor 接收副本，不能修改后续周期历史。
+`TensorPolicy` 给 actor 的数据是普通 Python 列表，不是 NumPy/PyTorch 张量。每个控制步推进历史；无语义回调时该行保持零和 valid=false。回合 Reset 清空历史；桥接按目标代次变化通知历史复位，代次不进入 actor 输入。actor 接收副本，不能修改后续周期历史。Gym 再将这些数值转换为上述 NumPy 数组及二动作掩码。
 
 ## 奖励与评估分数
 
-仿真 `reward_damage` 是本方本步实际伤害增量。首版目标使用伤害作为基础奖励；Python 尚未实现训练器需要的逐步 reward 与 terminated/truncated 完整适配。
+仿真 `reward_damage` 是本方本步实际伤害增量。Gym 将其作为逐步 reward，并按前述规则返回 terminated/truncated。
 
 `WindowScore` 是独立评估计分器：只统计窗口 `[start_ns,end_ns)` 内实际出膛弹丸最终造成的本方实际伤害。窗口内出膛、窗口后命中计入；窗口后或恰好截止出膛不计入。重复事件不重复加分；结算不完整或事件异常时，不提供完整 `official_damage`。
 
-关窗停止新请求，已有供弹和在途弹丸继续按物理规则结算。Reset 截断旧世界，不能替代自然结算。训练封装仍需决定尾部奖励与价值自举，不能把评估总分复制成每一步奖励。
+评估关窗停止新请求，已有供弹和在途弹丸继续按物理规则结算。Reset 截断旧世界，不能替代自然评估结算。训练采用时间截断价值自举，不把评估总分复制成每一步奖励。

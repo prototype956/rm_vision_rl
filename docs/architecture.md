@@ -31,10 +31,41 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 | [transport/vision_bridge.py](../rmvision_rl/transport/vision_bridge.py) | `VisionBridge` / `vision_worker`：桥接通信、策略询问、动作与发布确认 |
 | [environment/warmup.py](../rmvision_rl/environment/warmup.py) | `WarmupSession`：禁射搜索、连续新帧确认、就绪或超时 |
 | [environment/evaluation.py](../rmvision_rl/environment/evaluation.py) | `EvaluationSession`：预热、正式窗口和尾部结算生命周期 |
+| [environment/static_fire.py](../rmvision_rl/environment/static_fire.py) | `StaticFireEnv`：规则选板、二动作 Gym 采样、时间截断和独立进程生命周期 |
+| [training/environment.py](../rmvision_rl/training/environment.py) | 固定场景适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
+| [training/models.py](../rmvision_rl/training/models.py) | 模型构建/加载、观测契约及配置指纹、原子检查点 |
+| [training/train.py](../rmvision_rl/training/train.py) | 训练预算、完整更新、日志、周期保存和运行生命周期 |
 | [policy/observations.py](../rmvision_rl/policy/observations.py) | `encode` / `TensorPolicy`：语义字段编码、8 个控制周期的历史和有效性标记 |
 | [scoring/window.py](../rmvision_rl/scoring/window.py) | `WindowScore`：关联实际出膛与弹丸结果，计算窗口归属伤害 |
 
 `EvaluationSession` 接管仿真和桥接后，不应再从外部单独调用它们的步进接口，以免破坏控制、发布确认和计分时序。
+
+`StaticFireEnv` 同样独占其进程对。`reset()` 完成禁射预热后启动桥接训练模式，
+`prepare()` 在当周期策略回调处暂停并返回观测，`step(action)` 通过 `submit()` 恢复该回调，
+随后提交命令、推进一次物理并确认发布，再准备下一观测。无回调时缓存已计算的禁射命令，
+不跳过该周期。准备观测不推进物理，取消待决策周期不提交动作；取消后桥接必须 Reset。
+旧 `VisionBridge.step(response, policy)` 是这些操作的同步封装，原有评估调用方式不变。
+
+训练模式没有评估截止时间开关。30 秒上限由 Gym 管理，截止时准备真实末观测后取消未提交
+周期，返回 `truncated=True`，不额外结算或自动 Reset。环境只给实际发生的伤害奖励，
+由训练器使用末观测价值自举；评估仍单独用 `WindowScore` 做实际出膛窗口归属和尾部结算。
+
+## PPO 与未来循环策略
+
+当前配置显式使用 `algorithm=maskable_ppo`、`policy_kind=mlp`。模型构建/加载集中在
+`training.models`；Gym 和传输不依赖 PyTorch。`MultiInputPolicy` 在特征提取内部展平历史，
+环境仍输出 `[8,90]`，不额外做观测或奖励归一化。场景种子独立于 PPO seed，固定场景适配层
+在每次自动 Reset 重用场景种子和参数，也会重复测量噪声，首版不据此判断泛化效果。
+
+单环境 `DummyVecEnv` 保留终止观测和 `TimeLimit.truncated`，MaskablePPO 负责价值自举。
+Monitor 在此之前记录原始伤害奖励，不把价值估计记成实际伤害。训练端每次只请求一个完整
+rollout 的 `learn(reset_num_timesteps=False)`，保持当前观测和优化器连续；固定学习率与
+clip 参数没有分段调度问题。更新结束后才记录损失并允许保存检查点。
+
+当前 MaskablePPO 不原生支持循环策略。将来接入 GRU 需要同时处理序列 rollout、隐藏状态、
+回合起点、目标重建和动作掩码，不能只替换 MLP 层，也不能把八行历史当成跨 rollout 的记忆。
+这些能力应放在训练/策略层，新增独立的模型与训练实现；当前不提供空的 GRU 类。
+检查点的策略类型和观测契约用于阻止不兼容加载。
 
 ## C++ 桥接
 

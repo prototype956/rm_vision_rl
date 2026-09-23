@@ -19,6 +19,8 @@ using Json = nlohmann::json;
 namespace {
 using namespace mv;
 constexpr std::uint64_t EPOCH = 1'000'000'000'000'000'000ULL;
+// Unwind an unsubmitted policy cycle without completing MPC or publishing a command.
+struct PolicyCancelled {};
 auto Time(std::uint64_t ns) {
   return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
 }
@@ -74,6 +76,11 @@ class Bridge {
  public:
   explicit Bridge(const std::string& root, std::ostream* diagnostics = nullptr)
       : root_(root), diagnostics_(diagnostics) {}
+  void Discard() {
+    pending_.reset();
+    control_.reset();  // The next operation must Reset; no partially updated cycle is reusable.
+    training_ = false;
+  }
   Json Handle(const Json& request) {
     const std::string op = request.at("op");
     if (op == "reset") {
@@ -93,6 +100,7 @@ class Bridge {
       last_frame_.reset();
       search_start_.reset();
       evaluation_window_.reset();
+      training_ = false;
       policy_mode_ = "rule";
       fire_only_ = std::make_unique<modules::FireOnlyPolicyAdapter>(
           modules::ParseFireControlConfig(Load("fire_control")));
@@ -100,11 +108,28 @@ class Bridge {
       return {{"ok", true}};
     }
     Require(control_ != nullptr, "reset required");
+    if (op == "cancel") {
+      Keys(request, {"op"});
+      Require(pending_.has_value(), "no prepared command to cancel");
+      Discard();
+      return {{"ok", true}, {"kind", "cancelled"}};
+    }
+    if (op == "begin_training") {
+      Keys(request, {"op", "round_id", "start_ns"});
+      Require(!pending_ && last_tick_ && !evaluation_window_ && !training_,
+              "training requires an acknowledged warmup");
+      Require(request.at("round_id").get<std::uint64_t>() == round_ &&
+                  request.at("start_ns").get<std::uint64_t>() == *last_tick_ + 10'000'000,
+              "invalid training start");
+      training_ = true;
+      policy_mode_ = "fire_only";
+      return {{"ok", true}};
+    }
     if (op == "begin_evaluation") {
       Keys(request, {"op", "round_id", "start_ns", "end_ns", "policy_mode"});
       const std::string mode = request.value("policy_mode", "rule");
       Require(mode == "rule" || mode == "nine" || mode == "fire_only", "invalid policy mode");
-      Require(!pending_ && last_tick_ && !evaluation_window_,
+      Require(!pending_ && last_tick_ && !evaluation_window_ && !training_,
               "evaluation requires an acknowledged warmup");
       Require(request.at("round_id").get<std::uint64_t>() == round_, "old round evaluation");
       const auto start = request.at("start_ns").get<std::uint64_t>();
@@ -125,7 +150,7 @@ class Bridge {
     }
     Require(op == "step" || op == "step_policy", "unknown bridge operation");
     const bool external = op == "step_policy";
-    Require(external == (evaluation_window_.has_value() && policy_mode_ != "rule"),
+    Require(external == ((training_ || evaluation_window_.has_value()) && policy_mode_ != "rule"),
             "step operation does not match evaluation policy mode");
     Keys(request, {"op", "round_id", "sim_time_ns", "visual_frames", "feedback", "self_referee"});
     Require(!pending_, "ack previous publication first");
@@ -257,9 +282,14 @@ class Bridge {
                     "policy response missing or too large");
             const auto reply = Json::parse(line);
             Keys(reply, {"op", "token", "action"});
-            Require(reply.at("op") == "policy_action" && reply.at("token").is_number_unsigned() &&
+            Require(reply.at("token").is_number_unsigned() &&
                         reply.at("token").get<std::uint64_t>() == token,
                     "stale policy response");
+            if (reply.at("op") == "policy_cancel") {
+              Keys(reply, {"op", "token"});
+              throw PolicyCancelled{};
+            }
+            Require(reply.at("op") == "policy_action", "invalid policy response");
             const auto& action = reply.at("action");
             Require(action.is_number_integer() && action >= 0 && action <= 8,
                     "invalid policy action");
@@ -283,8 +313,8 @@ class Bridge {
     const bool lost_search = external && input_.prediction.state == modules::TrackerState::LOST &&
                              feedback.valid && (!input_.referee.valid || input_.referee.alive);
     const bool search = (!external || lost_search) && !output.command.valid;
-    // Search uses only self feedback. Warmup always suppresses fire; the optional bounded
-    // evaluation window publishes the real rule controller's result and acknowledges that result.
+    // Search uses only self feedback. Warmup suppresses fire; training and bounded evaluation
+    // publish the shared controller's result and acknowledge that result.
     if (search) {
       if (!search_start_) {
         search_start_ = now;
@@ -302,7 +332,8 @@ class Bridge {
     } else {
       search_start_.reset();
     }
-    output.command.fire = evaluation_window_ && now >= evaluation_window_->first && !search &&
+    const bool firing_enabled = training_ || (evaluation_window_ && now >= evaluation_window_->first);
+    output.command.fire = firing_enabled && !search &&
                           input_.prediction.state == modules::TrackerState::TRACKING && raw_fire;
     output.command.timestamp_ns = EPOCH + now;
     last_tick_ = now;
@@ -388,6 +419,7 @@ class Bridge {
   std::optional<std::uint64_t> search_start_;
   double search_origin_yaw_{0.0};
   std::optional<std::pair<std::uint64_t, std::uint64_t>> evaluation_window_;
+  bool training_{false};
   std::string policy_mode_{"rule"};
   std::uint64_t policy_token_{0};
   std::unique_ptr<modules::FireOnlyPolicyAdapter> fire_only_;
@@ -418,6 +450,9 @@ int main(int argc, char** argv) {
         throw std::runtime_error("bridge input too large");
       try {
         std::cout << bridge.Handle(Json::parse(line)).dump() << std::endl;
+      } catch (const PolicyCancelled&) {
+        bridge.Discard();
+        std::cout << Json({{"ok", true}, {"kind", "cancelled"}}).dump() << std::endl;
       } catch (const std::exception& e) {
         // Fail closed: a partial estimator/control update cannot be reused. Restart this process.
         std::cout << Json({{"ok", false}, {"error", e.what()}}).dump() << std::endl;

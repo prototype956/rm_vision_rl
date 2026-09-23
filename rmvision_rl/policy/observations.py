@@ -50,7 +50,9 @@ def encode(observation):
         add('feedback.'+axis+'.cos', math.cos(f[axis+'_rad']))
         add('feedback.'+axis+'_velocity_div_10radps', f[axis+'_velocity_rad_s'], 10)
     for field, scale in (('prediction_age_s',.1),('feedback_age_s',.1),('referee_age_s',.3),('since_request_s',1)):
-        add(field+'_normalized', o[field], scale)
+        # Null ages are unavailable/stale, not fresh zero-age samples. No previous request
+        # means the interval is unrestricted, equivalent to a saturated elapsed interval.
+        add(field+'_normalized', scale if o[field] is None else o[field], scale)
     for slot in range(-1,4):
         add('previous_slot.'+str(slot), o['previous_slot'] == slot)
     for field in ('valid','alive','fire_permitted','unlimited'):
@@ -99,6 +101,16 @@ class TensorPolicy:
         self.valid=deque([False]*HISTORY,maxlen=HISTORY)
         self.pending=False
         self.filled=False
+        self.generation=None
+
+    def set_generation(self, generation):
+        """Metadata resets history but is never supplied to the actor as a feature."""
+        if self.generation is not None and generation != self.generation:
+            pending = self.pending
+            self.reset()
+            if pending:
+                self.begin_step()
+        self.generation = generation
 
     def begin_step(self):
         self.rows.append([0.0]*self.feature_count)

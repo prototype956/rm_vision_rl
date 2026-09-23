@@ -41,9 +41,11 @@ class EvaluationSession:
         self.response = None
         self.score = None
         self.error = None
+        self.end_reason = None
 
     def reset(self, seed, scenario=None):
         self.status, self.error, self.score = "fault", None, None
+        self.end_reason = None
         scene = dict(scenario or {})
         scene.setdefault("target_hp", self.config.target_hp)
         if isinstance(self.policy, TensorPolicy):
@@ -56,8 +58,9 @@ class EvaluationSession:
     def info(self):
         now = self.response["sim_time_ns"] if self.response else 0
         start = self.score.start_ns if self.score else None
-        result = dict(status=self.status, config=asdict(self.config), error=self.error, physical_time_ns=now,
-                    evaluation_time_ns=min(now-start, self.config.window_ms*1_000_000) if start is not None else None,
+        result = dict(status=self.status, config=asdict(self.config), error=self.error,
+                    end_reason=self.end_reason, physical_time_ns=now,
+                    evaluation_time_ns=min(now, self.score.end_ns)-start if start is not None else None,
                     settlement_time_ns=max(0, now-self.score.end_ns) if self.score else 0,
                     score=self.score.summary() if self.score else None)
         if self.policy_mode != "rule":
@@ -114,7 +117,13 @@ class EvaluationSession:
                 if self.response["sim_time_ns"] != before+10_000_000:
                     raise RuntimeError("evaluation control step changed")
                 self.score.ingest(self.response)
-                if self.response["sim_time_ns"] == self.score.end_ns:
+                robots = {r["robot_id"]: r for r in self.response["data"]["evaluation"]["robots"]}
+                death = ("controlled_dead" if robots[1]["hp"] <= 0 else
+                         "target_destroyed" if robots[2]["hp"] <= 0 else None)
+                if death or self.response["sim_time_ns"] == self.score.end_ns:
+                    self.end_reason = death or "time_limit"
+                    if death:
+                        self.score.shorten(self.response["sim_time_ns"])
                     self._close()
                     responses.append(self.response)
             else:
