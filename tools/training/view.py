@@ -34,7 +34,6 @@ def _atomic_json(path, value):
 
 def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
     # 仅播放已有回放时延迟加载训练模块，避免依赖 PyTorch。
-    from gymnasium.utils.seeding import np_random
     from src.environment.evaluation import EvaluationConfig, EvaluationSession
     from src.environment.spawn import reset_spawn
     from src.policy.static_fire import StaticFirePolicy
@@ -75,8 +74,8 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
         policy = StaticFirePolicy(predict, decision_clock=settings.get("decision_clock"))
         session = EvaluationSession(client, bridge, evaluation_config,
                                     policy=policy, policy_mode="fire_only")
-        rng, _ = np_random(settings["scene_seed"])
-        scenario = base._scenario({"scenario": settings["scenario"]})
+        scenario, rng, scene_sample = base.prepare_scene(
+            seed=settings["scene_seed"], options={"scenario": settings["scenario"]})
         reset_spawn(session.reset, rng, scenario, attempts)
         initial_scene = session.response["data"]["evaluation"]["scenario"]
 
@@ -115,7 +114,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
             frames.append(snapshot)
 
         capture(session.response)
-        print(f"Evaluating {checkpoint.name}: fixed scene {settings['scene_seed']}, "
+        print(f"Evaluating {checkpoint.name}: reference scene {settings['scene_seed']}, "
               f"{evaluation_config.window_ms / 1000:g}s, deterministic masked policy", flush=True)
         ticks = 0
         while session.status in ("warming", "evaluating", "settling"):
@@ -146,6 +145,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
             "render": {"simulator_root": str(base.simulator_root),
                        "config": str(base.simulator_config), "assets": str(base.simulator_root / "assets")},
             "scene_seed": settings["scene_seed"], "reset_attempts": attempts,
+            "scene_sample": {**scene_sample, "spawn_seed": attempts[-1]["seed"]},
             "decision_clock": settings.get("decision_clock"),
             "scenario": initial_scene, "step_ns": 10_000_000,
             "summary": {"status": session.status, "end_reason": session.end_reason,

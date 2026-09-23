@@ -91,6 +91,18 @@ obs, info = env.reset(seed=17, options={'scenario': {
 这是采样示例，不进行学习，也不构成效果验收。最终由用户手工验收；需要辅助判断时再按需
 读取具体运行数据，不额外生成验收文件。伤害为零时，应结合实际出膛及现有视觉控制效果判断。
 
+旋转靶可直接通过 Gym 使用同一采样器：
+
+```python
+import gymnasium as gym
+import src
+
+with gym.make('RMRotationFire-v0', episode_steps=500,
+              angular_speed_range_rad_s=[1, 7]) as env:
+    obs, info = env.reset(seed=17)
+    # 完成回合后 env.reset() 取下一场景；reset(seed=17) 从头复现场景序列。
+```
+
 ## 3. PPO 训练、恢复和推理
 
 训练依赖与基础 Gym 分开安装；在本仓库根目录执行：
@@ -108,8 +120,8 @@ artifacts/venv/bin/python -m src.training.train --help
 
 ```bash
 artifacts/venv/bin/python -m src.training.train \
-  --config config/training/static_fire_ppo.json \
-  --output-dir artifacts/training/static-front-v1
+  --config config/training/rotation_fire_ppo.json \
+  --output-dir artifacts/training/rotation-v1
 ```
 
 输出目录必须尚不存在；省略时自动在 `artifacts/training/` 下创建唯一目录。
@@ -118,8 +130,18 @@ MLP，以及单环境 `DummyVecEnv`。`--timesteps` 覆盖本次预算，向上�
 启动时显示；`--seed` 只改变 PPO 随机种子，场景种子另由配置的 `environment.scene_seed` 控制。
 配置中的相对环境路径相对于本仓库根目录解析。
 
-每个回合都用 Gym 场景种子 17、4 m、目标方位/朝向和己方朝向均为 0 的正面静止靶，包括
-向量环境自动 Reset；因此也会重复测量噪声。基础 Gym 的默认随机出生方式不变。
+默认配置为 `config/training/rotation_fire_ppo.json`：每回合重新生成双方位置和朝向、
+2–8 米目标距离、目标方位，以及双向 1–7 rad/s 的匀速旋转。省略初始云台角度时朝向目标。
+旋转从禁射预热开始，进入正式采样时不重置姿态。出生使用仿真器几何和初始可见性检查；
+非零旋转还需通过每 5° 的整圈可见性采样，避免高台/障碍物只在初始相位短暂露出装甲。
+更新此检查后需要重新构建 `daedalus_training` 和 `training_preview`。被拒绝的种子记录在
+`reset_attempts` 中，使用现有最多 32 次出生重试；不会跳过真正的预热超时。
+`environment.scene_seed`（默认 17）控制可复现的场景序列，自动 Reset 和手动 R 都取下一场景。
+`environment.angular_speed_range_rad_s` 配置速度大小范围，例如 `[1, 3]`；正反方向各半，
+要求 `0 < min <= max <= 7`。不要设置 `scenario.motion`，它由环境采样生成。
+若要使用原固定 4 米正面静止靶，显式传入 `--config config/training/static_fire_ppo.json`。
+旧配置省略 `environment.task` 时仍解释为静止靶，旧检查点保留原行为。
+恢复旋转靶训练从保存种子的首个场景重新开始，不接续中断前的场景随机流。
 默认 PPO 训练回合为 5 秒（500 步），预热单独计时；要调整回合长度、rollout 或 minibatch，编辑配置副本对应的
 `environment.episode_steps`、`ppo.n_steps` 和 `ppo.batch_size`。minibatch 必须整除 rollout。
 
@@ -139,10 +161,10 @@ MLP，以及单环境 `DummyVecEnv`。`--timesteps` 覆盖本次预算，向上�
 手动测试当前配置：
 
 ```bash
-artifacts/venv/bin/python -m tools.training.manual --config config/training/static_fire_ppo.json
+artifacts/venv/bin/python -m tools.training.manual --config config/training/rotation_fire_ppo.json
 ```
 
-HUD 显示距下次决策的时间；长按 F 只在到期且原火控合法时提交请求。R 清零奖励、重新预热相同场景，并切换到下一个时钟随机流。每回合仍为 500 步/5 秒。时钟会跳过部分仍在冷却中的机会，因此启用后持续发射分数可能低于原无时钟的 1380；随机发射伤害也不保证严格按概率缩放。
+HUD 显示距下次决策的时间；长按 F 只在到期且原火控合法时提交请求。R 清零奖励、生成并预热下一场景（静止靶配置仍重复相同场景），并切换到下一个时钟随机流。每回合仍为 500 步/5 秒。时钟会跳过部分仍在冷却中的机会，因此启用后持续发射分数可能低于原无时钟的 1380；随机发射伤害也不保证严格按概率缩放。
 
 旧检查点保存的配置没有该对象，`--resume`、`--checkpoint` 回放及手动模式都会保持旧行为；新增观测/动作时序需要新建训练，不能静默改变旧检查点。所有候选模型评估使用各自保存的时钟配置，并从随机流 0 开始。
 
@@ -168,12 +190,12 @@ HUD 显示距下次决策的时间；长按 F 只在到期且原火控合法时�
 
 ```bash
 artifacts/venv/bin/python -m src.training.train \
-  --resume artifacts/training/static-front-v1/latest.zip \
+  --resume artifacts/training/rotation-v1/latest.zip \
   --timesteps 65536 \
-  --output-dir artifacts/training/static-front-v1-resume
+  --output-dir artifacts/training/rotation-v1-resume
 ```
 
-恢复预算是**追加步数**。恢复权重、优化器和累计步数，环境从新的固定场景回合开始；不恢复
+恢复预算是**追加步数**。恢复权重、优化器和累计步数，环境从保存场景序列的首个回合开始；不恢复
 原物理世界或未完成 rollout。恢复沿用检查点内配置，不同时接受 `--config` 或 `--seed`，
 只允许覆盖预算、设备和输出目录。观测规格或环境/视觉配置指纹变化时拒绝恢复。
 Ctrl+C、SIGTERM 或运行故障会退出并清理进程，保留已有完整检查点，不保存半次更新。
@@ -198,7 +220,7 @@ from sb3_contrib.common.maskable.utils import get_action_masks
 from src.training.environment import make_environment
 from src.training.models import read_checkpoint_metadata, load_model
 
-checkpoint = Path('artifacts/training/static-front-v1/final.zip')
+checkpoint = Path('artifacts/training/rotation-v1/final.zip')
 metadata = read_checkpoint_metadata(checkpoint)
 env = make_environment(metadata['config'], Path('artifacts/inference'))
 try:
@@ -230,7 +252,7 @@ PYCODE
 `best.zip` 不受后来重新分析影响，训练目录的 `best.zip` 指向最近一次成功选优的结果。
 预热失败、结算不完整或异常的候选不参与排名；部分失败标注“有效候选中的最佳”。全部失败
 不发布新 `best.zip`，之前的文件保留但不代表本次结果；本次结果以 `analysis.json` 为准。
-报告仍展示已有训练曲线和失败说明。这里的最佳仅指本次目录中已保存模型在固定场景下的表现，
+报告仍展示已有训练曲线和失败说明。这里的最佳仅指本次目录中已保存模型在首个参考场景下的表现，
 不代表所有更新时刻或跨场景泛化表现；恢复训练不扫描此前目录。
 
 评估结束后打开 HTML 报告，并同时启动 Final／Best 两个三维回放窗口。标题和 HUD 标识角色、
@@ -246,10 +268,10 @@ PYCODE
 
 ```bash
 artifacts/venv/bin/python -m tools.training.analysis \
-  --run-dir artifacts/training/static-front-v1
+  --run-dir artifacts/training/rotation-v1
 # 无窗口评估；仍生成 best.zip、回放和报告
 artifacts/venv/bin/python -m tools.training.analysis \
-  --run-dir artifacts/training/static-front-v1 --no-view
+  --run-dir artifacts/training/rotation-v1 --no-view
 ```
 
 分析入口也支持 `--device` 和 `--viewer-binary`。它只接受 `run.json` 状态为 `complete` 的目录；
@@ -266,9 +288,9 @@ cargo build --offline --release --no-default-features --features training --exam
 
 ```bash
 artifacts/venv/bin/python -m tools.training.view \
-  --checkpoint artifacts/training/static-front-v1/final.zip
+  --checkpoint artifacts/training/rotation-v1/final.zip
 artifacts/venv/bin/python -m tools.training.view \
-  --replay artifacts/training/static-front-v1/evaluation/eval-XXXX/replay.json
+  --replay artifacts/training/rotation-v1/evaluation/eval-XXXX/replay.json
 ```
 
 `--checkpoint` 使用确定性、带动作掩码的推理，不更新参数。场景、种子、测量和回合长度沿用
@@ -299,7 +321,7 @@ artifacts/venv/bin/python -m tools.training.view \
 
 ```bash
 artifacts/venv/bin/python -m tools.training.diagnose \
-  --checkpoint artifacts/training/static-front-v1/final.zip --rollouts 3
+  --checkpoint artifacts/training/rotation-v1/final.zip --rollouts 3
 ```
 
 `--checkpoint` 必填；`--rollouts` 默认为 3，按保存的 `n_steps` 执行完整采样与更新。
@@ -307,7 +329,7 @@ artifacts/venv/bin/python -m tools.training.diagnose \
 `artifacts/diagnostics/diagnose-*/`。无需图形环境；结束后打印本地 `report.html` 路径，
 可手动用浏览器打开，图表脚本内嵌，支持离线悬停、缩放和图例切换。
 
-诊断从检查点快照恢复权重、优化器及固定场景配置，并从新回合开始；不会重建此前训练的随机数
+诊断从检查点快照恢复权重、优化器及场景配置，并从新回合开始；不会重建此前训练的随机数
 或物理现场。沿用原奖励、掩码、回合上限和 PPO 参数，不强制发射，不运行选优／回放，不覆盖
 原模型或发布 `best.zip`、`latest.zip`。没有命中时也不自动增加预算。
 
@@ -344,10 +366,10 @@ artifacts/venv/bin/python -m unittest discover -s tests -p test_diagnose.py -v
 artifacts/venv/bin/python -m tools.training.manual
 # 使用已有模型保存的环境配置与契约，不执行模型推理
 artifacts/venv/bin/python -m tools.training.manual \
-  --checkpoint artifacts/training/static-front-v1/final.zip
+  --checkpoint artifacts/training/rotation-v1/final.zip
 # 显式延长回合；窗口和运行记录会标注覆盖值
 artifacts/venv/bin/python -m tools.training.manual \
-  --config config/training/static_fire_ppo.json --episode-steps 1000
+  --config config/training/rotation_fire_ppo.json --episode-steps 1000
 ```
 
 `--config` 与 `--checkpoint` 互斥，省略时使用默认训练配置。`--checkpoint` 先验证原环境／观测
@@ -359,7 +381,7 @@ artifacts/venv/bin/python -m tools.training.manual \
 | --- | --- |
 | 按住 `F` | 每个环境步持续请求发射；松开停止请求，继续自动跟踪 |
 | `Space` | 暂停／继续；暂停时 F 不推进时间，也不积攒请求 |
-| `R` | 重置同一场景、重新禁射预热，清零奖励，预热完成后自动运行 |
+| `R` | 生成下一场景（静止靶重复原场景）、禁射预热并清零奖励，预热完成后自动运行 |
 | `C`、方向键、`PageUp/PageDown` | 切换相机、环绕及缩放 |
 
 预热完成后默认按正常仿真速度连续运行，无需按键推进时间；原 N／F 单步操作已移除。
@@ -376,6 +398,7 @@ HUD 的 `Step reward` 是最近一步原始 Gym 奖励，`Total reward` 是当�
 
 默认产物在 `artifacts/manual/manual-*/`：`run.json` 保存配置、覆盖值和状态，`steps.csv`
 逐步记录动作、掩码、请求接受情况、出膛数及奖励，`episodes.monitor.csv` 记录完整回合，
+环境目录内 `scenes.jsonl` 记录每回合场景序号、复现种子、角速度、实际出生和拒绝原因；
 另保存查看器和环境进程日志；不默认录制完整画面。异常时保留最后画面并标记 `FAULT`，
 物理进程停止，不自动重试发射。关闭窗口、Ctrl+C 或 SIGTERM 清理该会话拥有的全部进程。
 
@@ -509,3 +532,6 @@ session = EvaluationSession(
 | 缺少桥接二进制 | 完成 CMake 构建，核对输出路径 |
 | 预热超时或长期无有效命令 | 检查场景、测量、跟踪及 MPC 配置；保留超时，不静默重复抽样 |
 | 找不到旧验收命令 | 历史工具已删除，使用本文运行库示例 |
+
+2026-09-23 的旋转出生可见性修复会改变部分 seed 的接纳结果。旧检查点的观测/动作和
+配置指纹仍兼容，可恢复权重及优化器；修复前后的场景分布不能当作完全一致的评估条件。

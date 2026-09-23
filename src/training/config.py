@@ -4,9 +4,10 @@ import json
 import math
 from pathlib import Path
 from src.policy.decision_clock import validate_clock
+from src.environment.rotation_fire import rotation_scenario, validate_speed_range
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = ROOT / "config/training/static_fire_ppo.json"
+DEFAULT_CONFIG = ROOT / "config/training/rotation_fire_ppo.json"
 ENV_PATHS = ("simulator_root", "vision_root", "simulator_binary", "bridge_binary", "simulator_config")
 
 
@@ -33,12 +34,22 @@ def validate_config(value):
         raise ValueError("device must be a nonempty PyTorch device string")
     env = config["environment"]
     if (not isinstance(env, dict) or not {"episode_steps", "scene_seed", "scenario"} <= env.keys()
-            or set(env) - {"episode_steps", "scene_seed", "scenario", "decision_clock", *ENV_PATHS}):
+            or set(env) - {"episode_steps", "scene_seed", "scenario", "decision_clock", "task",
+                           "angular_speed_range_rad_s", *ENV_PATHS}):
         raise ValueError("invalid environment config keys")
     integer("episode_steps", env["episode_steps"])
     integer("scene_seed", env["scene_seed"], 0)
     if not isinstance(env["scenario"], dict):
         raise ValueError("environment.scenario must be an object")
+    task = env.get("task", "static_fire")
+    if task not in ("static_fire", "random_rotation_fire"):
+        raise ValueError("environment.task must be static_fire or random_rotation_fire")
+    if task == "random_rotation_fire":
+        env["angular_speed_range_rad_s"] = validate_speed_range(
+            env.get("angular_speed_range_rad_s", [1, 7]))
+        rotation_scenario({"scenario": env["scenario"]})
+    elif "angular_speed_range_rad_s" in env:
+        raise ValueError("angular_speed_range_rad_s requires random_rotation_fire")
     if "decision_clock" in env:
         if env["decision_clock"] is None:
             raise ValueError("omit decision_clock to disable it")

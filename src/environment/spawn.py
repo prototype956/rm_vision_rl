@@ -23,4 +23,4 @@ def reset_spawn(reset, rng, scenario, attempts):
             if not str(error).startswith("invalid seed "):
                 raise
             attempt["error"] = str(error)
-    raise RuntimeError(f"no legal static spawn in 32 attempts: {attempts}")
+    raise RuntimeError(f"no legal spawn in 32 attempts: {attempts}")

@@ -1,4 +1,4 @@
-"""固定训练场景配置，使 SB3 自动重置回合时仍使用相同场景。"""
+"""按任务选择固定场景或随机场景序列，独立于 SB3 的模型种子。"""
 import copy
 
 import gymnasium as gym
@@ -6,6 +6,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.environment.static_fire import StaticFireEnv
+from src.environment.rotation_fire import RotationFireEnv
 from src.training.config import ENV_PATHS
 
 
@@ -30,14 +31,38 @@ class FixedScenario(gym.Wrapper):
         return self.env.action_masks()
 
 
+class RandomScenario(FixedScenario):
+    """首次以 scene_seed 初始化，后续 reset 连续采样；忽略模型传入的 seed。
+
+    恢复训练创建新实例，因此从保存种子的首个场景重新开始。
+    """
+
+    def __init__(self, env, scene_seed, scenario):
+        super().__init__(env, scene_seed, scenario)
+        self._started = False
+
+    def reset(self, *, seed=None, options=None):
+        if options:
+            raise ValueError("training reset options are fixed by its saved configuration")
+        result = self.env.reset(seed=None if self._started else self.scene_seed,
+                                options={"scenario": self.scenario})
+        self._started = True
+        return result
+
+
 def make_environment(config, log_dir, monitor_file=None):
-    """创建尚未启动的固定场景环境，每个实例独占一对仿真与视觉桥接进程。"""
+    """创建尚未启动的任务环境，每个实例独占一对仿真与视觉桥接进程。"""
     settings = config["environment"]
     kwargs = {key: settings[key] for key in ENV_PATHS if key in settings}
     if "decision_clock" in settings:
         kwargs["decision_clock"] = settings["decision_clock"]
-    base = StaticFireEnv(episode_steps=settings["episode_steps"], log_dir=log_dir, **kwargs)
-    env = FixedScenario(base, settings["scene_seed"], settings["scenario"])
+    rotation = settings.get("task", "static_fire") == "random_rotation_fire"
+    if rotation:
+        kwargs["angular_speed_range_rad_s"] = settings.get("angular_speed_range_rad_s", [1, 7])
+    base_class = RotationFireEnv if rotation else StaticFireEnv
+    wrapper = RandomScenario if rotation else FixedScenario
+    base = base_class(episode_steps=settings["episode_steps"], log_dir=log_dir, **kwargs)
+    env = wrapper(base, settings["scene_seed"], settings["scenario"])
     return Monitor(env, filename=str(monitor_file) if monitor_file else None,
                    info_keywords=("episode_damage", "actual_shots", "end_reason"))
 

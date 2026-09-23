@@ -80,7 +80,7 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
         resume: 待恢复的检查点路径，与 config 和 seed 互斥。
         output_dir: 新运行目录，必须尚不存在。
         timesteps: 本次新增采样步数，向上取整到完整 rollout。
-        seed: 新模型的随机种子，不影响固定场景种子。
+        seed: 新模型的随机种子，不影响场景种子。
         device: 覆盖配置中的 PyTorch 计算设备。
 
     Returns:
@@ -180,12 +180,12 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train the static-target MaskablePPO/MLP policy")
+    parser = argparse.ArgumentParser(description="Train a fire-control MaskablePPO/MLP policy")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--config", type=Path, help=f"JSON config (default: {DEFAULT_CONFIG})")
     source.add_argument("--resume", type=Path, help="checkpoint ZIP; continue from a fresh simulator episode")
     parser.add_argument("--timesteps", type=int, help="additional samples, rounded up to complete rollouts")
-    parser.add_argument("--seed", type=int, help="new model RNG seed; does not change the fixed scene seed")
+    parser.add_argument("--seed", type=int, help="new model RNG seed; does not change the scene seed")
     parser.add_argument("--device", help="PyTorch device, defaults to config (cpu)")
     parser.add_argument("--output-dir", type=Path, help="new run directory; must not already exist")
     args = parser.parse_args()

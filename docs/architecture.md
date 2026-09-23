@@ -31,8 +31,8 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 | [transport/vision_bridge.py](../src/transport/vision_bridge.py) | `VisionBridge` / `vision_worker`：桥接通信、策略询问、动作与发布确认 |
 | [environment/warmup.py](../src/environment/warmup.py) | `WarmupSession`：禁射搜索、连续新帧确认、就绪或超时 |
 | [environment/evaluation.py](../src/environment/evaluation.py) | `EvaluationSession`：预热、正式窗口和尾部结算生命周期 |
-| [environment/static_fire.py](../src/environment/static_fire.py) | `StaticFireEnv`：规则选板、二动作 Gym 采样、时间截断和独立进程生命周期 |
-| [training/environment.py](../src/training/environment.py) | 固定场景适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
+| [environment/fire.py](../src/environment/fire.py) | `FireEnv`：规则选板、二动作 Gym 采样、时间截断和独立进程生命周期；静止/旋转子类提供场景规则 |
+| [training/environment.py](../src/training/environment.py) | 任务与场景序列适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
 | [training/models.py](../src/training/models.py) | 模型构建/加载、观测契约及配置指纹、原子检查点 |
 | [training/train.py](../src/training/train.py) | 训练预算、完整更新、日志、周期保存和运行生命周期 |
 | [policy/observations.py](../src/policy/observations.py) | `encode` / `TensorPolicy`：语义字段编码、8 个控制周期的历史和有效性标记 |
@@ -40,7 +40,7 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 
 `EvaluationSession` 接管仿真和桥接后，不应再从外部单独调用它们的步进接口，以免破坏控制、发布确认和计分时序。
 
-`StaticFireEnv` 同样独占其进程对。`reset()` 完成禁射预热后启动桥接训练模式，
+`StaticFireEnv` 和 `RotationFireEnv` 通过公共 `FireEnv` 独占各自进程对。`reset()` 完成禁射预热后启动桥接训练模式，
 `prepare()` 在当周期策略回调处暂停并返回观测，`step(action)` 通过 `submit()` 恢复该回调，
 随后提交命令、推进一次物理并确认发布，再准备下一观测。无回调时缓存已计算的禁射命令，
 不跳过该周期。准备观测不推进物理，取消待决策周期不提交动作；取消后桥接必须 Reset。
@@ -54,8 +54,8 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 
 当前配置显式使用 `algorithm=maskable_ppo`、`policy_kind=mlp`。模型构建/加载集中在
 `training.models`；Gym 和传输不依赖 PyTorch。`MultiInputPolicy` 在特征提取内部展平历史，
-环境仍输出 `[8,90]`，不额外做观测或奖励归一化。场景种子独立于 PPO seed，固定场景适配层
-在每次自动 Reset 重用场景种子和参数，也会重复测量噪声，首版不据此判断泛化效果。
+环境仍输出 `[8,90]`，不额外做观测或奖励归一化。场景种子独立于 PPO seed。旋转任务在每次自动 Reset 采样下一场景；
+静止任务重用场景种子和参数，也会重复测量噪声。单参考场景评估不代表泛化效果。
 
 单环境 `DummyVecEnv` 保留终止观测和 `TimeLimit.truncated`，MaskablePPO 负责价值自举。
 Monitor 在此之前记录原始伤害奖励，不把价值估计记成实际伤害。训练端每次只请求一个完整

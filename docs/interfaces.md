@@ -131,10 +131,35 @@ episode_steps 返回 truncated，二者相遇以真正终止为准。末观测�
 `shot_accepted`、`reject_reason`、`reset_attempts` 和 `warmup`。请求状态对应刚执行的动作，
 返回 obs/mask 对应下一决策周期。info 含实验及评估数据，禁止整体送入网络。
 
+## 随机旋转靶 Gym
+
+`RMRotationFire-v0` / `RotationFireEnv` 与静止靶共用 `FireEnv` 的进程、预热、观测、
+动作和奖励接口。额外构造参数 `angular_speed_range_rad_s=(1, 7)` 指定角速度大小范围。
+`options.scenario` 不允许包含 motion；默认不补齐位置、距离、方位或朝向，交给仿真器采样。
+HP 和测量默认值与静止靶相同，旋转不会增加策略观测字段。
+
+每回合从 Gym RNG 取一个 `episode_seed`，再通过固定域 0/1 派生角速度和出生重试子流。
+角速度大小均匀采样、正反方向等概率，正号按 Bevy 世界 +Y 右手旋转。出生失败只重抽仿真种子，
+不改变本回合角速度或下一回合采样结果。仿真器 revision 5 在非零旋转出生时以固定初始
+相机每 5° 检查整圈可见性；地形遮挡导致某相位无完整可见装甲时按非法出生重试，
+通过后仍执行原有预热确认。预热期间也持续旋转，超时直接报错。
+
+`prepare_scene(seed=None, options=None)` 仅采样并返回 `(scenario, spawn_rng, sample)`，
+不启动进程；它会消耗一次场景采样，供 Gym reset 和独立评估共用，不应在 reset 前额外调用。
+显式 Gym seed 重启序列；`reset()` 继续。`info.scene` 包含从 0 开始的 `episode_index`、
+`episode_seed`、`angular_speed_rad_s`、成功的 `spawn_seed` 和仿真器出生报告 `scenario`。
+每次成功出生时写入环境目录 `scenes.jsonl`，包含全部 `reset_attempts`；该记录不代表预热成功。
+这些真值仅用于复现与诊断，禁止送入策略网络。
+
+检查点保存未采样的场景模板与速度范围；单模型评估总是取保存种子的首个场景，
+同配置的候选检查点使用相同参考场景比较，不代表跨场景泛化成绩。
+回放头部增加 `scene_sample`（场景序号、回合种子、角速度、成功出生种子），
+`scenario` 仍记录实际出生报告；旧回放读取不依赖新字段。
+
 ## PPO 配置与检查点
 
 训练入口为 `python -m src.training.train`，默认读取
-`config/training/static_fire_ppo.json`。配置包含版本、算法/策略类型、PPO seed、device、
+`config/training/rotation_fire_ppo.json`。配置包含版本、算法/策略类型、PPO seed、device、
 torch_threads、total_timesteps、checkpoint_updates、environment 和 ppo。
 仅支持 `maskable_ppo/mlp`；`ppo.net_arch` 分别配置 Actor 的 pi 和 Critic 的 vf 层宽，
 激活函数固定 Tanh；其余初始参数见配置。学习率和 clip 为常数，不支持分段调度。
@@ -143,7 +168,11 @@ environment 包含 episode_steps、scene_seed、scenario，并可配置 Gym 的�
 simulator_root、vision_root、simulator_binary、bridge_binary、simulator_config。
 可选 `environment.decision_clock` 包含 `min_interval_ms`、`max_interval_ms`、`resample`、`seed` 四个必需字段。
 区间端点为 10 ms 的整数倍，支持 10–60000 ms 且最小值不大于最大值；`resample` 为 `decision`（每次机会后采样）或 `episode`（每回合采样一个周期），seed 为独立的 32 位非负整数。省略整个对象表示关闭，保留旧动作契约。
-场景与模型 seed 独立；训练包装器忽略 SB3 的环境播种请求，每次 Reset 重用固定场景 seed。
+可选 `environment.task` 为 `static_fire`（省略时保持旧行为）或 `random_rotation_fire`。
+旋转任务的 `angular_speed_range_rad_s` 默认 `[1, 7]`，要求有限数值且 `0 < min <= max <= 7`；
+静止任务禁止该字段，旋转任务禁止在 `scenario` 中指定 `motion`。
+场景与模型 seed 独立；包装器忽略 SB3 的环境播种请求。静止任务每次 Reset 重用固定种子；
+旋转任务仅首次用 scene_seed 初始化，随后持续采样。恢复训练重启场景序列，不恢复其进度。
 `--config` 和 `--resume` 互斥；恢复不接受 `--seed`，只允许覆盖 device、追加 timesteps 和新输出目录。
 
 模型 ZIP 使用 SB3 格式保存权重、优化器和累计步数，并额外嵌入 `rmvision.json`，将配置、

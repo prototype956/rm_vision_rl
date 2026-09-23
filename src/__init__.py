@@ -7,3 +7,5 @@ except ModuleNotFoundError as error:
 else:
     register(id="RMStaticFire-v0",
              entry_point="src.environment.static_fire:StaticFireEnv")
+    register(id="RMRotationFire-v0",
+             entry_point="src.environment.rotation_fire:RotationFireEnv")

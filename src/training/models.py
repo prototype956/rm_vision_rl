@@ -54,6 +54,8 @@ def training_metadata(config, env):
     config["environment"]["episode_steps"] = base.episode_steps
     config["environment"]["scene_seed"] = wrapped.get_wrapper_attr("scene_seed")
     config["environment"]["scenario"] = base._scenario({"scenario": wrapped.get_wrapper_attr("scenario")})
+    if config["environment"].get("task") == "random_rotation_fire":
+        config["environment"]["angular_speed_range_rad_s"] = list(base.angular_speed_range_rad_s)
     modules = base.vision_root / "src/config/modules"
     files = sorted(modules.rglob("*.yaml"))
     if not files:

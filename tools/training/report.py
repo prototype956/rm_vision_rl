@@ -191,7 +191,7 @@ td:last-child{{white-space:normal;min-width:100px}}thead{{background:#f4f6f9}}.w
 <div class="table-wrap"><table><thead><tr><th>角色</th><th>来源模型</th><th>累计步数</th><th>归属伤害</th><th>命中率</th><th>出膛数</th></tr></thead><tbody>{comparison}</tbody></table></div></section>
 <section><h2>全部候选与排名</h2><div class="table-wrap"><table><thead><tr><th>排名</th><th>来源模型</th><th>累计步数</th><th>归属伤害</th><th>命中率</th><th>出膛数</th><th>状态</th><th>说明</th></tr></thead><tbody>{''.join(ranking)}</tbody></table></div></section>
 {''.join(parts)}
-<footer><p>范围：仅本次训练目录的已保存检查点；固定场景的结果不代表跨场景泛化表现。训练奖励与独立窗口结算伤害口径不同。</p>
+<footer><p>范围：仅本次训练目录的已保存检查点；单个参考场景的结果不代表跨场景泛化表现。训练奖励与独立窗口结算伤害口径不同。</p>
 <p>数据来源：本分析目录中的 episodes.monitor.csv、logs/progress.csv 和 evaluation/ 回放；模型、摘要及状态见 <a href="analysis.json">analysis.json</a>。
 累计步数包含恢复训练的起始偏移，仅绘制完整回合。未记录的指标不补零。</p>
 <p>操作：悬停查看数值，拖动框选缩放，双击复位，点击图例隐藏／显示曲线。报告内嵌 Plotly，可离线打开。</p></footer>

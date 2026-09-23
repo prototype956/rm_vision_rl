@@ -2,7 +2,7 @@
 
 用于 RoboMaster 火控强化学习的环境适配项目。策略负责当前跟踪目标的装甲板选择和开火时机，继续复用视觉项目的 PnP、目标预测、弹道解算和 TinyMPC。
 
-**当前提供静止靶 Gymnasium 环境 `RMStaticFire-v0`、MaskablePPO/MLP 训练入口，以及原有规则和 Python 回调评估闭环。** Gym 使用规则选板和两个开火动作，每步推进 10 ms，基础环境默认预热后采样 30 秒。PPO 训练默认使用固定正面靶、5 秒（500 步）回合，支持检查点恢复、CSV 和 TensorBoard 日志。GRU、模型导出和实机推理属于后续工作。
+**当前提供随机原地旋转靶 `RMRotationFire-v0`、静止靶 `RMStaticFire-v0`、MaskablePPO/MLP 训练入口，以及规则和 Python 回调评估闭环。** Gym 使用规则选板和两个开火动作，每步推进 10 ms，基础环境默认预热后采样 30 秒。PPO 训练默认使用每回合随机出生的原地旋转靶（2–8 米，双向 1–7 rad/s 匀速）、5 秒（500 步）回合，支持检查点恢复、CSV 和 TensorBoard 日志。GRU、模型导出和实机推理属于后续工作。
 
 ## 项目关系
 
@@ -17,9 +17,9 @@
 ```text
 src/
   transport/                仿真客户端、进程管理、C++ 桥接通信
-  environment/              静止靶 Gym、禁射预热和有界评估会话
+  environment/              静止/旋转靶 Gym、禁射预热和有界评估会话
   policy/                   观测编码与短历史
-  training/                 固定场景、模型构建加载、PPO 入口及训练配置
+  training/                 任务选择与场景序列、模型构建加载、PPO 入口及训练配置
   scoring/                  按实际出膛时间归属伤害的评估计分
 native/vision_bridge/       C++ 桥接源码及构建入口
 config/observations/       观测特征 schema
@@ -44,7 +44,8 @@ Python 示例从本仓库根目录执行；Gym 安装 `requirements.txt`，PPO �
 检查点、按完整窗口伤害选出 `best.zip`，生成报告并打开 Final／Best 回放窗口。
 分析命令的 `--no-view` 只禁止打开窗口，仍生成全部分析产物。
 `python -m tools.training.manual` 可在实时运行的真实 Gym 环境中手动连发，并显示单步奖励、
-累计奖励和最近非零奖励；预热后自动运行，按住 F 连发、松开停止请求，空格暂停／继续、R 重置。
+累计奖励和最近非零奖励；预热后自动运行，按住 F 连发、松开停止请求，空格暂停／继续、R 生成下一场景。
+默认配置为 `config/training/rotation_fire_ppo.json`；显式选择 `static_fire_ppo.json` 可继续使用固定静止靶。
 新训练及默认手动配置启用 **50–100 ms 随机射击决策时钟**，每次机会后独立重采样，其他控制步仍每 10 ms 更新。
 范围、采样方式和独立种子在 `environment.decision_clock` 配置；HUD 显示下一次机会的倒计时。
 旧检查点未保存时钟配置时沿用旧行为；时钟增加观测/动作契约，需要新建训练。详见[运行文档](docs/running.md)。

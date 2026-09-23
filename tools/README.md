@@ -17,7 +17,7 @@
 ```bash
 python -m tools.training.analysis --run-dir <训练目录> --no-view
 python -m tools.training.view --checkpoint <模型.zip>
-python -m tools.training.manual --config config/training/static_fire_ppo.json
+python -m tools.training.manual --config config/training/rotation_fire_ppo.json
 python -m tools.training.diagnose --checkpoint <模型.zip> --rollouts 3
 ```
 
@@ -26,3 +26,7 @@ python -m tools.training.diagnose --checkpoint <模型.zip> --rollouts 3
 `report.py` 和 `diagnostic_report.py` 由对应工具调用。
 
 历史 `tools.validation` 等验收命令不再使用。
+
+默认手动环境每回合随机生成原地旋转靶，R 切换下一场景。静止靶仍可显式选择
+`config/training/static_fire_ppo.json`。检查点评估使用保存场景序列的首个参考场景，
+不将单场景分数解释为泛化表现。
