@@ -31,7 +31,7 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 | [transport/vision_bridge.py](../src/transport/vision_bridge.py) | `VisionBridge` / `vision_worker`：桥接通信、策略询问、动作与发布确认 |
 | [environment/warmup.py](../src/environment/warmup.py) | `WarmupSession`：禁射搜索、连续新帧确认、就绪或超时 |
 | [environment/evaluation.py](../src/environment/evaluation.py) | `EvaluationSession`：预热、正式窗口和尾部结算生命周期 |
-| [environment/fire.py](../src/environment/fire.py) | `FireEnv`：规则选板、二动作 Gym 采样、时间截断和独立进程生命周期；静止/旋转子类提供场景规则 |
+| [environment/fire.py](../src/environment/fire.py) | `FireEnv`：规则两动作/联合九动作 Gym 采样、时间截断和独立进程生命周期；静止/旋转子类提供场景规则 |
 | [training/environment.py](../src/training/environment.py) | 任务与场景序列适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
 | [training/models.py](../src/training/models.py) | 模型构建/加载、观测契约及配置指纹、原子检查点 |
 | [training/train.py](../src/training/train.py) | 训练预算、完整更新、日志、周期保存和运行生命周期 |
@@ -54,7 +54,7 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 
 当前配置显式使用 `algorithm=maskable_ppo`、`policy_kind=mlp`。模型构建/加载集中在
 `training.models`；Gym 和传输不依赖 PyTorch。`MultiInputPolicy` 在特征提取内部展平历史，
-环境仍输出 `[8,90]`，不额外做观测或奖励归一化。场景种子独立于 PPO seed。旋转任务在每次自动 Reset 采样下一场景；
+环境输出 fire_only 的 `[8,90]` 或 joint 的 `[8,107]`，不额外做观测或奖励归一化。场景种子独立于 PPO seed。旋转任务在每次自动 Reset 采样下一场景；
 静止任务重用场景种子和参数，也会重复测量噪声。单参考场景评估不代表泛化效果。
 
 单环境 `DummyVecEnv` 保留终止观测和 `TimeLimit.truncated`，MaskablePPO 负责价值自举。
@@ -110,3 +110,14 @@ clip 参数没有分段调度问题。更新结束后才记录损失并允许保
 Python 仅合并自身武器通道的机械间隔、供弹忙和枪口无效三个位，避免把 50 ms 的机械冷却锁在 100 ms 裁判采样周期里。热量、生命和弹量继续使用裁判快照；物理后端仍最终裁决每次出膛。合成检测的整板可见性测试排除小弹丸，防止开火本身造成系统性的虚假暂时丢失。
 
 当前己方底盘固定，目标支持静止、正弦平移或匀速旋转。合成观测的几何可见性近似不等价于真实渲染检测结果，限制见[当前状态](development.md)。
+
+## 联合策略的数据流
+
+`environment.action_mode` 与静止/旋转任务独立。`make_policy` 创建共用 `DecisionPolicy`
+生命周期的两动作或联合策略；Gym、独立评估都在预热后启动时钟，每个已完成物理步后推进一次。
+`TensorPolicy` 根据 v1/v2 schema 编码历史，目标代次变化只清历史，不重置射击时钟。
+
+联合模式通过桥接 `begin_training(policy_mode="nine")` 获取所有有效弹道候选，跳过
+`FireOnlyPolicyAdapter`。RL 输出槽位和射击请求，C++ 核心负责该槽位的弹道、MPC 和执行门控。
+观测中的当前/命中朝向及选板时长均由估计和控制历史生成，真值只写入日志/回放。
+`tools.training.compare` 先确定共同合法出生，再用相同 seed 和场景分别重置两策略，不重采样失败场景。

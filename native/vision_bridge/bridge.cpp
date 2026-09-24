@@ -1,19 +1,18 @@
-#include "core/logger.hpp"
-#include "modules/armor_pnp/armor_pnp.hpp"
-#include "modules/armor_predictor/armor_predictor.hpp"
-#include "modules/fire_control/control_session.hpp"
-#include "modules/fire_control/fire_only_policy_adapter.hpp"
-#include "policy_wire.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
-
 #include <nlohmann/json.hpp>
 #include <numbers>
+
+#include "core/logger.hpp"
+#include "modules/armor_pnp/armor_pnp.hpp"
+#include "modules/armor_predictor/armor_predictor.hpp"
+#include "modules/fire_control/control_session.hpp"
+#include "modules/fire_control/fire_only_policy_adapter.hpp"
+#include "policy_wire.hpp"
 
 using Json = nlohmann::json;
 namespace {
@@ -25,8 +24,7 @@ auto Time(std::uint64_t ns) {
   return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
 }
 void Require(bool valid, const char* message) {
-  if (!valid)
-    throw std::runtime_error(message);
+  if (!valid) throw std::runtime_error(message);
 }
 void Keys(const Json& value, std::initializer_list<std::string_view> allowed) {
   Require(value.is_object(), "object required");
@@ -125,14 +123,16 @@ class Bridge {
       return {{"ok", true}, {"kind", "cancelled"}};
     }
     if (op == "begin_training") {
-      Keys(request, {"op", "round_id", "start_ns"});
+      Keys(request, {"op", "round_id", "start_ns", "policy_mode"});
+      const std::string mode = request.value("policy_mode", "fire_only");
+      Require(mode == "fire_only" || mode == "nine", "invalid training policy mode");
       Require(!pending_ && last_tick_ && !evaluation_window_ && !training_,
               "training requires an acknowledged warmup");
       Require(request.at("round_id").get<std::uint64_t>() == round_ &&
                   request.at("start_ns").get<std::uint64_t>() == *last_tick_ + 10'000'000,
               "invalid training start");
       training_ = true;
-      policy_mode_ = "fire_only";
+      policy_mode_ = mode;
       return {{"ok", true}};
     }
     if (op == "begin_evaluation") {
@@ -342,7 +342,8 @@ class Bridge {
     } else {
       search_start_.reset();
     }
-    const bool firing_enabled = training_ || (evaluation_window_ && now >= evaluation_window_->first);
+    const bool firing_enabled =
+        training_ || (evaluation_window_ && now >= evaluation_window_->first);
     output.command.fire = firing_enabled && !search &&
                           input_.prediction.state == modules::TrackerState::TRACKING && raw_fire;
     output.command.timestamp_ns = EPOCH + now;
@@ -359,6 +360,8 @@ class Bridge {
          {{"search", search},
           {"raw_fire", raw_fire},
           {"selected_slot", output.selected_slot},
+          {"slot_switched", pending_->diagnostics.armor_selection.switched},
+          {"track_generation", input_.prediction.track_generation},
           {"reject_reason", static_cast<int>(output.reject_reason)}}},
         {"command",
          {{"valid", output.command.valid},
@@ -455,8 +458,7 @@ int main(int argc, char** argv) {
     Bridge bridge(argv[1], argc == 4 ? &diagnostics : nullptr);
     std::string line;
     while (std::getline(std::cin, line)) {
-      if (line.size() > 1024 * 1024)
-        throw std::runtime_error("bridge input too large");
+      if (line.size() > 1024 * 1024) throw std::runtime_error("bridge input too large");
       try {
         std::cout << bridge.Handle(Json::parse(line)).dump() << std::endl;
       } catch (const PolicyCancelled&) {

@@ -7,7 +7,7 @@ from src.policy.decision_clock import validate_clock
 from src.environment.rotation_fire import rotation_scenario, validate_speed_range
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = ROOT / "config/training/rotation_fire_ppo.json"
+DEFAULT_CONFIG = ROOT / "config/training/rotation_joint_ppo.json"
 ENV_PATHS = ("simulator_root", "vision_root", "simulator_binary", "bridge_binary", "simulator_config")
 
 
@@ -35,12 +35,14 @@ def validate_config(value):
     env = config["environment"]
     if (not isinstance(env, dict) or not {"episode_steps", "scene_seed", "scenario"} <= env.keys()
             or set(env) - {"episode_steps", "scene_seed", "scenario", "decision_clock", "task",
-                           "angular_speed_range_rad_s", *ENV_PATHS}):
+                           "angular_speed_range_rad_s", "action_mode", *ENV_PATHS}):
         raise ValueError("invalid environment config keys")
     integer("episode_steps", env["episode_steps"])
     integer("scene_seed", env["scene_seed"], 0)
     if not isinstance(env["scenario"], dict):
         raise ValueError("environment.scenario must be an object")
+    if env.get("action_mode", "fire_only") not in ("fire_only", "joint"):
+        raise ValueError("environment.action_mode must be fire_only or joint")
     task = env.get("task", "static_fire")
     if task not in ("static_fire", "random_rotation_fire"):
         raise ValueError("environment.task must be static_fire or random_rotation_fire")

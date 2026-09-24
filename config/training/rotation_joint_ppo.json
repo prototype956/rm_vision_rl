@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "algorithm": "maskable_ppo",
+  "policy_kind": "mlp",
+  "seed": 17,
+  "device": "cpu",
+  "torch_threads": 1,
+  "total_timesteps": 65536,
+  "checkpoint_updates": 4,
+  "environment": {
+    "episode_steps": 500,
+    "scene_seed": 17,
+    "decision_clock": {
+      "min_interval_ms": 50,
+      "max_interval_ms": 100,
+      "resample": "decision",
+      "seed": 17
+    },
+    "scenario": {
+      "target_hp": 100000,
+      "unlimited_heat": true,
+      "measurements": {
+        "noise_std_px": 0.25,
+        "latency_ms": 20,
+        "dropout_probability": 0.0
+      }
+    },
+    "task": "random_rotation_fire",
+    "angular_speed_range_rad_s": [
+      1,
+      7
+    ],
+    "action_mode": "joint"
+  },
+  "ppo": {
+    "n_steps": 1024,
+    "batch_size": 256,
+    "n_epochs": 10,
+    "learning_rate": 0.0003,
+    "gamma": 0.999,
+    "gae_lambda": 0.99,
+    "clip_range": 0.2,
+    "ent_coef": 0.01,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "net_arch": {
+      "pi": [
+        128,
+        128
+      ],
+      "vf": [
+        128,
+        128
+      ]
+    }
+  }
+}

@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass
 
 from src.environment.warmup import WarmupSession
 from src.policy.observations import TensorPolicy
-from src.policy.static_fire import StaticFirePolicy
+from src.policy.decision import DecisionPolicy
 from src.scoring.window import WindowScore, integer
 
 
@@ -46,6 +46,7 @@ class EvaluationSession:
     def reset(self, seed, scenario=None):
         self.status, self.error, self.score = "fault", None, None
         self.end_reason = None
+        self.selection = dict(selected_slot=-1, slot_switched=False, slot_switches=0)
         scene = dict(scenario or {})
         scene.setdefault("target_hp", self.config.target_hp)
         if isinstance(self.policy, TensorPolicy):
@@ -60,6 +61,7 @@ class EvaluationSession:
         start = self.score.start_ns if self.score else None
         result = dict(status=self.status, config=asdict(self.config), error=self.error,
                     end_reason=self.end_reason, physical_time_ns=now,
+                    selection=getattr(self, "selection", {}),
                     evaluation_time_ns=min(now, self.score.end_ns)-start if start is not None else None,
                     settlement_time_ns=max(0, now-self.score.end_ns) if self.score else 0,
                     score=self.score.summary() if self.score else None)
@@ -90,7 +92,7 @@ class EvaluationSession:
                 self.response = self.warmup.response
                 responses.append(self.response)
                 if self.warmup.status == "ready":
-                    if isinstance(self.policy, StaticFirePolicy):
+                    if isinstance(self.policy, DecisionPolicy):
                         self.policy.clock.start_episode()
                     start = self.warmup.evaluation_start_ns
                     self.score = WindowScore(self.response["round_id"], start,
@@ -112,7 +114,7 @@ class EvaluationSession:
                 if isinstance(self.policy, TensorPolicy):
                     self.policy.begin_step()
                 clock_before = (self.policy.clock.info()
-                                if isinstance(self.policy, StaticFirePolicy) else None)
+                                if isinstance(self.policy, DecisionPolicy) else None)
                 result = (self.bridge.step(self.response) if self.policy is None else
                           self.bridge.step(self.response, self.policy))
                 self.response = self.client.advance(**result["command"])
@@ -120,12 +122,16 @@ class EvaluationSession:
                 self.bridge.ack(True)
                 if self.response["sim_time_ns"] != before+10_000_000:
                     raise RuntimeError("evaluation control step changed")
-                if isinstance(self.policy, StaticFirePolicy):
+                if isinstance(self.policy, DecisionPolicy):
                     self.policy.clock.complete_step()
                     if clock_before is not None:
                         result["decision_clock_before"] = clock_before
                         result["physical_fire_legal"] = self.policy.physical_fire_action is not None
                         result["decision_clock_after"] = self.policy.clock.info()
+                control = result['control']
+                self.selection = dict(selected_slot=control['selected_slot'],
+                                      slot_switched=control.get('slot_switched', False),
+                                      slot_switches=self.selection['slot_switches'] + int(control.get('slot_switched', False)))
                 self.score.ingest(self.response)
                 robots = {r["robot_id"]: r for r in self.response["data"]["evaluation"]["robots"]}
                 death = ("controlled_dead" if robots[1]["hp"] <= 0 else

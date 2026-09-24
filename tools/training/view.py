@@ -32,11 +32,11 @@ def _atomic_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
+def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None, scene_override=None):
     # 仅播放已有回放时延迟加载训练模块，避免依赖 PyTorch。
     from src.environment.evaluation import EvaluationConfig, EvaluationSession
     from src.environment.spawn import reset_spawn
-    from src.policy.static_fire import StaticFirePolicy
+    from src.policy.decision import make_policy
     from src.training.environment import make_environment
     from src.training.models import load_model, read_checkpoint_metadata
     from src.transport.processes import training_worker
@@ -55,6 +55,7 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
     output = Path(tempfile.mkdtemp(prefix="eval-", dir=parent))
     frames, attempts = [], []
     raw_damage = 0.0
+    last_control, last_action = {}, None
     with ExitStack() as stack:
         # 用尚未启动的环境生成与训练一致的检查点契约。
         env = make_environment(config, output / "environment")
@@ -71,12 +72,20 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
                                       action_masks=obs["action_mask"].astype(bool, copy=True))
             return int(action.item())
 
-        policy = StaticFirePolicy(predict, decision_clock=settings.get("decision_clock"))
+        policy = make_policy(settings.get("action_mode", "fire_only"), predict,
+                             decision_clock=settings.get("decision_clock"))
         session = EvaluationSession(client, bridge, evaluation_config,
-                                    policy=policy, policy_mode="fire_only")
-        scenario, rng, scene_sample = base.prepare_scene(
-            seed=settings["scene_seed"], options={"scenario": settings["scenario"]})
-        reset_spawn(session.reset, rng, scenario, attempts)
+                                    policy=policy, policy_mode=policy.bridge_mode)
+        if scene_override is None:
+            scenario, rng, scene_sample = base.prepare_scene(
+                seed=settings["scene_seed"], options={"scenario": settings["scenario"]})
+            reset_spawn(session.reset, rng, scenario, attempts)
+        else:
+            # 对照场景已完成出生检查，双方必须使用同一个 seed；这里不再重试换场。
+            scenario = scene_override["scenario"]
+            scene_sample = {"comparison_scene": scene_override["scene_id"]}
+            attempts.append({"seed": scene_override["spawn_seed"]})
+            session.reset(scene_override["spawn_seed"], scenario)
         initial_scene = session.response["data"]["evaluation"]["scenario"]
 
         def capture(response):
@@ -84,6 +93,8 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
             score = session.score.summary() if session.score else None
             stats = session.info()
             metrics = {
+                **stats["selection"], "action_mode": settings.get("action_mode", "fire_only"),
+                "wire_action": last_action, "control": last_control,
                 "raw_damage": raw_damage,
                 "eligible_damage": score["eligible_damage_observed"] if score else 0,
                 "official_damage": score["official_damage"] if score else None,
@@ -121,6 +132,8 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
             phase = session.status
             result = session.advance()
             if phase == "evaluating":
+                last_control = result["vision"]["control"]
+                last_action = (result["vision"].get("policy") or {}).get("action", 0)
                 raw_damage += float(result["responses"][0]["data"]["reward_damage"])
             for response in result["responses"]:
                 capture(response)
@@ -147,9 +160,12 @@ def evaluate_checkpoint(checkpoint, *, device=None, output_dir=None):
             "scene_seed": settings["scene_seed"], "reset_attempts": attempts,
             "scene_sample": {**scene_sample, "spawn_seed": attempts[-1]["seed"]},
             "decision_clock": settings.get("decision_clock"),
+            "action_mode": settings.get("action_mode", "fire_only"),
+            "scene_override": scene_override,
             "scenario": initial_scene, "step_ns": 10_000_000,
             "summary": {"status": session.status, "end_reason": session.end_reason,
                         "raw_damage": raw_damage, "score": score,
+                        "slot_switches": session.selection["slot_switches"],
                         "hit_rate": score["damaging_projectiles"] / score["eligible_shots"]
                         if score["eligible_shots"] else None},
             "frames": frames,
@@ -245,6 +261,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, help="parent directory for a new evaluation run")
     parser.add_argument("--viewer-binary", type=Path)
     parser.add_argument("--label", help="optional window/HUD label")
+    parser.add_argument("--no-view", action="store_true", help="save evaluation replay without opening a window")
     args = parser.parse_args()
     if args.replay and (args.device is not None or args.output_dir is not None):
         parser.error("--device and --output-dir apply only to --checkpoint")
@@ -255,7 +272,8 @@ def main():
     previous = signal.signal(signal.SIGTERM, stop)
     try:
         path = args.replay or evaluate_checkpoint(args.checkpoint, device=args.device, output_dir=args.output_dir)
-        open_replay(path, viewer_binary=args.viewer_binary, label=args.label)
+        if not args.no_view:
+            open_replay(path, viewer_binary=args.viewer_binary, label=args.label)
     finally:
         signal.signal(signal.SIGTERM, previous)
 

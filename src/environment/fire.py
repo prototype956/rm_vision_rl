@@ -11,8 +11,8 @@ from gymnasium import spaces
 import numpy as np
 
 from src.environment.warmup import STEP_NS, WarmupConfig, WarmupSession
-from src.policy.observations import FEATURE_NAMES, HISTORY
-from src.policy.static_fire import StaticFirePolicy
+from src.policy.observations import HISTORY
+from src.policy.decision import make_policy
 from src.environment.spawn import reset_spawn
 from src.transport.processes import training_worker
 from src.transport.vision_bridge import vision_worker
@@ -31,7 +31,8 @@ class FireEnv(gym.Env):
 
     def __init__(self, *, simulator_root=None, vision_root=None, simulator_binary=None,
                  bridge_binary=None, simulator_config=None, log_dir=None,
-                 episode_steps=3000, warmup_config=None, render_mode=None, decision_clock=None):
+                 episode_steps=3000, warmup_config=None, render_mode=None, decision_clock=None,
+                 action_mode="fire_only"):
         super().__init__()
         if render_mode is not None:
             raise ValueError("FireEnv only supports render_mode=None")
@@ -50,19 +51,21 @@ class FireEnv(gym.Env):
         self.episode_steps = episode_steps
         self.warmup_config = warmup_config or WarmupConfig()
         self.render_mode = None
-        self.action_space = spaces.Discrete(2)
+        self.action_mode = action_mode
+        self._history = make_policy(action_mode, decision_clock=decision_clock)
+        self.action_space = spaces.Discrete(self._history.action_count)
         self.observation_space = spaces.Dict({
-            "features": spaces.Box(-1.0, 1.0, (HISTORY, len(FEATURE_NAMES)), np.float32),
+            "features": spaces.Box(-1.0, 1.0, (HISTORY, self._history.feature_count), np.float32),
             "valid": spaces.MultiBinary(HISTORY),
-            "action_mask": spaces.MultiBinary(2),
+            "action_mask": spaces.MultiBinary(int(self.action_space.n)),
         })
-        self._history = StaticFirePolicy(decision_clock=decision_clock)
         if self._history.clock.enabled:
             self.observation_space.spaces["decision_clock"] = spaces.Box(
                 np.zeros(5, dtype=np.float32), np.array([1, 60, 60, 60, 60], dtype=np.float32))
         self._stack = None
         self._clock_log = None
         self._scene_log = None
+        self._action_log = None
         self._client = self._bridge = None
         self._prepared = self._response = self._obs = None
         self._status = "idle"
@@ -77,6 +80,7 @@ class FireEnv(gym.Env):
         self._output = Path(tempfile.mkdtemp(prefix="env-", dir=self.log_dir))
         self._stack = ExitStack()
         self._scene_log = self._stack.enter_context((self._output / "scenes.jsonl").open("w"))
+        self._action_log = self._stack.enter_context((self._output / "actions.jsonl").open("w"))
         if self._history.clock.enabled:
             self._clock_log = self._stack.enter_context((self._output / "decision-clock.jsonl").open("w"))
         self._client = self._stack.enter_context(training_worker(
@@ -139,9 +143,11 @@ class FireEnv(gym.Env):
         self._status = "resetting"
         self._steps = 0
         self._damage = 0.0
+        self._switches = 0
         self._last_request = {"action": None, "action_masked": False,
                               "shot_requested": False, "shot_accepted": False,
-                              "reject_reason": None}
+                              "reject_reason": None, "executed_action": None, "wire_action": None,
+                              "selected_slot": -1, "slot_switched": False, "mask_reason": None}
         self._history.reset()
         self._reset_attempts = []
         try:
@@ -165,12 +171,14 @@ class FireEnv(gym.Env):
             self._warmup_info = warmup.info()
             # 进程内通信计数器不能作为可复现的回合信息。
             self._warmup_info.pop("round_id")
-            self._bridge.begin_training(self._response["round_id"], self._start_ns)
+            self._bridge.begin_training(self._response["round_id"], self._start_ns,
+                                        policy_mode=self._history.bridge_mode)
             self._history.clock.start_episode()
             self._prepare()
             self._status = "ready"
             return self._observation(), self._info(0.0, None)
-        except Exception:
+        except BaseException:
+            # 中断也必须携带异常回收进程，不能对尚未确认的请求发送正常 Close。
             self._fail()
             raise
 
@@ -184,14 +192,13 @@ class FireEnv(gym.Env):
             # 跳过策略回调的周期仍占用一行历史，并推进一个物理步。
             if self._prepared["command"]["fire"]:
                 raise RuntimeError("a skipped policy callback must not issue fire")
-        self._track_action, self._fire_action = self._history.track_action, self._history.fire_action
         self._obs = self._history.observation()
 
     def _observation(self):
         return {key: value.copy() for key, value in self._obs.items()}
 
     def action_masks(self):
-        """返回当前二动作布尔掩码的副本，必须先完成 reset。"""
+        """返回当前动作空间布尔掩码的副本，必须先完成 reset。"""
         if self._status != "ready":
             raise RuntimeError("reset required before querying action masks")
         return self._obs["action_mask"].astype(bool, copy=True)
@@ -217,6 +224,7 @@ class FireEnv(gym.Env):
     def _info(self, reward, reason):
         own = self._robots()[1]
         result = {"damage": reward, "episode_damage": self._damage,
+                "action_mode": self.action_mode, "slot_switches": self._switches,
                 "actual_shots": own["actual_shots"], "episode_steps": self._steps,
                 "episode_time_s": self._steps * 0.01,
                 "physical_time_ns": self._response["sim_time_ns"],
@@ -230,10 +238,10 @@ class FireEnv(gym.Env):
         return result
 
     def step(self, action):
-        """执行一个二动作决策，推进 10 ms 并准备下一观测。
+        """执行一个策略决策，推进 10 ms 并准备下一观测。
 
         Args:
-            action: 整数 0 表示跟踪，1 表示请求单发；被掩码禁止的单发请求按跟踪执行。
+            action: 整数动作，语义由 action_mode 确定；非法射击只降级为同板跟踪或等待。
 
         Returns:
             (obs, reward, terminated, truncated, info)。reward 为本步实际伤害；
@@ -243,15 +251,18 @@ class FireEnv(gym.Env):
         if self._status != "ready":
             raise RuntimeError("reset required before step (episode ended or environment not ready)")
         if isinstance(action, (bool, np.bool_)) or not isinstance(action, (int, np.integer)):
-            raise ValueError("action must be an integer in {0,1}")
+            raise ValueError(f"action must be an integer in [0,{self.action_space.n - 1}]")
         if not self.action_space.contains(action):
-            raise ValueError("action must be an integer in {0,1}")
+            raise ValueError(f"action must be an integer in [0,{self.action_space.n - 1}]")
         action = int(action)
         try:
             clock_before = self._history.clock.info()
             physical_fire_legal = self._history.physical_fire_action is not None
-            masked = action == 1 and self._fire_action is None
-            wire_action = self._fire_action if action == 1 and not masked else self._track_action
+            executed, wire_action = self._history.resolve_action(action)
+            masked = executed != action
+            clock_masked = (self._history.requests_fire(action) and clock_before is not None
+                            and not clock_before["decision_due"])
+            mask_reason = ("decision_clock" if clock_masked else "fire_control") if masked else None
             result = (self._bridge.submit(wire_action)
                       if self._prepared.get("kind") == "policy_observation" else self._prepared)
             before = self._response["sim_time_ns"]
@@ -263,8 +274,13 @@ class FireEnv(gym.Env):
             reward = float(self._response["data"]["reward_damage"])
             self._damage += reward
             control = result["control"]
+            switched = control.get("slot_switched", False)
+            self._switches += int(switched)
             self._last_request = {
-                "action": action, "action_masked": masked,
+                "action": action, "executed_action": executed, "wire_action": wire_action,
+                "action_masked": masked, "mask_reason": mask_reason,
+                "selected_slot": control["selected_slot"], "slot_switched": switched,
+                "track_generation": control.get("track_generation"),
                 "shot_requested": control.get("shot_requested", False),
                 "shot_accepted": control.get("shot_accepted", False),
                 "reject_reason": control.get("reject_reason_name"),
@@ -272,7 +288,11 @@ class FireEnv(gym.Env):
             if clock_before is not None:
                 self._last_request.update(
                     decision_clock_before=clock_before, physical_fire_legal_before=physical_fire_legal,
-                    clock_masked=action == 1 and not clock_before["decision_due"])
+                    clock_masked=clock_masked)
+            self._action_log.write(json.dumps({"episode_index": self._scene_info["episode_index"],
+                                              "physical_time_ns": before, **self._last_request},
+                                             allow_nan=False) + "\n")
+            self._action_log.flush()
             # 完成控制步后即消耗到期机会，TRACK 或 LOST 周期也不例外。
             # 读取观测、跳过回调或重置目标代次均不触发随机抽样。
             self._history.clock.complete_step()
@@ -300,7 +320,7 @@ class FireEnv(gym.Env):
                 self._prepared = None
                 self._status = "complete"
             return self._observation(), reward, terminated, truncated, self._info(reward, reason)
-        except Exception:
+        except BaseException:
             self._fail()
             raise
 

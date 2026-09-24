@@ -18,7 +18,7 @@ def associate_actions(steps, events):
     StaticFireEnv 保证每次状态转换恰好推进 STEP_NS。
     """
     commands = {(r["episode"], EPOCH_NS + r["physical_time_ns"] - STEP_NS): r
-                for r in steps if r["action"] == 1 and r["shot_accepted"]}
+                for r in steps if r.get("fire_action", r["action"] == 1) and r["shot_accepted"]}
     requests = {}
     for event in events:
         if event["kind"] == "fire_requested" and event["data"].get("robot_id") == 1:
@@ -148,8 +148,8 @@ def write_report(output, state, steps, events):
     for label, kind, level in (("物理请求", "fire_requested", 1), ("实际出膛", "shot_fired", 2), ("伤害", "damage_applied", 3)):
         selected = [e for e in events if e["kind"] == kind and e["data"].get("robot_id", e["data"].get("shooter")) == 1]
         timeline.append((label, [e["training_step"] for e in selected], [level] * len(selected), "markers"))
-    timeline.insert(0, ("Gym 发射动作", [r["training_step"] for r in steps if r["action"] == 1],
-                        [0] * sum(r["action"] == 1 for r in steps), "markers"))
+    timeline.insert(0, ("Gym 发射动作", [r["training_step"] for r in steps if r.get("fire_action", r["action"] == 1)],
+                        [0] * sum(r.get("fire_action", r["action"] == 1) for r in steps), "markers"))
     chart("发射—出膛—伤害时间线", "纵轴为事件类别；编号关联和真实物理时间保存在 events.jsonl。", timeline, "事件类别")
     chart("同一观测与掩码的发射概率", "更新前后只重算网络，不运行新的环境。禁止发射的步骤单独列示。", [
         (f"{LABELS[group]} · {label}", [r["training_step"] for r in steps if r["group"] == group],
@@ -181,7 +181,7 @@ def write_report(output, state, steps, events):
             contribution_series.append((f"轮 {number} · 奖励步骤 {local[j]['training_step']}",
                                         [r["training_step"] for r in local[start:j + 1]], contributions[0, start:j + 1], "lines+markers"))
             for i in range(start, j + 1):
-                if local[i]["action"] == 1:
+                if local[i].get("fire_action", local[i]["action"] == 1):
                     example_rows.append((number, local[j]["training_step"], local[i]["training_step"], j-i,
                                          float(data["raw_rewards"][j]), float(contributions[0, i])))
     chart("移除奖励后的优势变化", "每轮展示首个非零奖励的敏感性曲线；NPZ 包含全部非零奖励对本段每一步的贡献矩阵。贡献不等于弹丸因果归属。", contribution_series, "原优势 − 移除奖励后的优势")

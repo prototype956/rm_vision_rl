@@ -2,7 +2,7 @@
 
 用于 RoboMaster 火控强化学习的环境适配项目。策略负责当前跟踪目标的装甲板选择和开火时机，继续复用视觉项目的 PnP、目标预测、弹道解算和 TinyMPC。
 
-**当前提供随机原地旋转靶 `RMRotationFire-v0`、静止靶 `RMStaticFire-v0`、MaskablePPO/MLP 训练入口，以及规则和 Python 回调评估闭环。** Gym 使用规则选板和两个开火动作，每步推进 10 ms，基础环境默认预热后采样 30 秒。PPO 训练默认使用每回合随机出生的原地旋转靶（2–8 米，双向 1–7 rad/s 匀速）、5 秒（500 步）回合，支持检查点恢复、CSV 和 TensorBoard 日志。GRU、模型导出和实机推理属于后续工作。
+**当前提供随机原地旋转靶 `RMRotationFire-v0`、静止靶 `RMStaticFire-v0`、MaskablePPO/MLP 训练入口，以及规则和 Python 回调评估闭环。** Gym 支持规则选板的两动作模式和 RL 联合选板/开火的九动作模式，每步推进 10 ms，基础环境默认预热后采样 30 秒。PPO 训练默认使用联合九动作策略和每回合随机出生的原地旋转靶（2–8 米，双向 1–7 rad/s 匀速）、5 秒（500 步）回合，支持检查点恢复、CSV 和 TensorBoard 日志。GRU、模型导出和实机推理属于后续工作。
 
 ## 项目关系
 
@@ -44,12 +44,28 @@ Python 示例从本仓库根目录执行；Gym 安装 `requirements.txt`，PPO �
 检查点、按完整窗口伤害选出 `best.zip`，生成报告并打开 Final／Best 回放窗口。
 分析命令的 `--no-view` 只禁止打开窗口，仍生成全部分析产物。
 `python -m tools.training.manual` 可在实时运行的真实 Gym 环境中手动连发，并显示单步奖励、
-累计奖励和最近非零奖励；预热后自动运行，按住 F 连发、松开停止请求，空格暂停／继续、R 生成下一场景。
-默认配置为 `config/training/rotation_fire_ppo.json`；显式选择 `static_fire_ppo.json` 可继续使用固定静止靶。
+累计奖励和最近非零奖励；预热后自动运行，联合模式先按 1–4 选板，再按住 F 请求射击、松开停止新请求，空格暂停／继续、R 生成下一场景。
+默认配置为 `config/training/rotation_joint_ppo.json`；显式选择 `static_fire_ppo.json` 可继续使用固定静止靶。
 新训练及默认手动配置启用 **50–100 ms 随机射击决策时钟**，每次机会后独立重采样，其他控制步仍每 10 ms 更新。
 范围、采样方式和独立种子在 `environment.decision_clock` 配置；HUD 显示下一次机会的倒计时。
 旧检查点未保存时钟配置时沿用旧行为；时钟增加观测/动作契约，需要新建训练。详见[运行文档](docs/running.md)。
 `python -m tools.training.view --checkpoint <模型.zip>` 可手动查看，
 `--replay <replay.json>` 可重新播放；构建、计分口径及操作见运行文档。
-历史验收、诊断和基线工具已删除，旧 `tools.validation` 等命令不再适用。本次不新增验收程序，
-最终由用户手工验收；短训练可运行不表示策略已收敛或超过传统火控。
+旧 `tools.validation` 等命令不再适用。短训练可运行不表示策略已收敛或超过传统火控。
+
+联合模式设定 `environment.action_mode="joint"`，选板每 10 ms 更新，不套用传统选板角度门限。
+非射击机会仍可切板；已有脉冲继续执行。省略该字段保持 `fire_only`，原
+`config/training/rotation_fire_ppo.json` 可用于继续训练旧两动作模型。新模型使用 v2 的
+`features[8,107]` 和九动作掩码，不能恢复两动作权重。
+
+```bash
+# 短链路检查：一个 rollout；不会启动默认的长训练预算
+artifacts/venv/bin/python -m src.training.train --timesteps 1024 --output-dir artifacts/training/joint-check
+# 3/5/7 m × ±1/±3/±7 rad/s，共 18 个配对场景；两个模型均须为 5 秒回合
+artifacts/venv/bin/python -m tools.training.compare \
+  --checkpoint artifacts/training/joint-check/final.zip \
+  --baseline-checkpoint <旧两动作模型.zip>
+```
+
+比较命令输出逐场景回放、JSON/CSV 和 `comparison.html`；相同出生、时钟和配置的双方完整结果
+才进入配对汇总，失败场景单列。场景和短训练的结果不能直接外推实机效果。

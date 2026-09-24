@@ -20,7 +20,8 @@ CSV_FIELDS = ("episode", "step", "time_s", "action", "fire_legal_before", "fire_
               "action_masked", "shot_requested", "shot_accepted", "reject_reason", "actual_shots",
               "reward", "cumulative_reward", "last_nonzero_reward", "last_nonzero_step",
               "terminated", "truncated", "end_reason", "decision_due_before", "decision_wait_ms",
-              "decision_due_next", "clock_episode_stream", "physical_fire_legal_before", "clock_masked")
+              "decision_due_next", "clock_episode_stream", "physical_fire_legal_before", "clock_masked",
+              "executed_action", "wire_action", "selected_slot", "slot_switched", "slot_switches", "mask_reason")
 
 
 class ManualSession:
@@ -32,6 +33,10 @@ class ManualSession:
         self.episode, self.step, self.total = 0, 0, 0.0
         self.last_reward, self.last_step = None, None
         self.done, self.obs = True, None
+
+    def fire_legal(self):
+        indices = [1] if self.env.action_space.n == 2 else [2, 4, 6, 8]
+        return bool(self.obs["action_mask"][indices].any())
 
     def execute(self, request):
         operation = request["op"]
@@ -46,9 +51,9 @@ class ManualSession:
             if self.done:
                 raise ValueError("episode ended or not started; reset before stepping")
             action = request.get("action")
-            if type(action) is not int or action not in (0, 1):
-                raise ValueError("manual action must be 0 (track) or 1 (request fire)")
-            before = bool(self.obs["action_mask"][1])
+            if type(action) is not int or not self.env.action_space.contains(action):
+                raise ValueError("manual action must be in the configured action space")
+            before = self.fire_legal()
             self.obs, reward, terminated, truncated, info = self.env.step(action)
             reward = float(reward)
             self.step += 1
@@ -59,7 +64,7 @@ class ManualSession:
         else:
             raise ValueError(f"unknown manual operation: {operation}")
         metrics = dict(episode=self.episode, step=self.step, time_s=info["episode_time_s"], action=action,
-                       fire_legal_before=before, fire_legal_next=bool(self.obs["action_mask"][1]),
+                       fire_legal_before=before, fire_legal_next=self.fire_legal(),
                        action_masked=info["action_masked"], shot_requested=info["shot_requested"],
                        shot_accepted=info["shot_accepted"], reject_reason=info["reject_reason"],
                        actual_shots=info["actual_shots"], reward=reward, cumulative_reward=self.total,
@@ -72,10 +77,13 @@ class ManualSession:
                        clock_episode_stream=clock.get("episode_stream"),
                        physical_fire_legal_before=info.get("physical_fire_legal_before"),
                        clock_masked=info.get("clock_masked", False))
+        metrics.update({key: info.get(key) for key in
+                        ("executed_action", "wire_action", "selected_slot", "slot_switched", "slot_switches", "mask_reason")})
         if operation == "step":
             self.writer.writerow(metrics)
             self.file.flush()
-        metrics.update(episode_steps=self.env.unwrapped.episode_steps,
+        metrics.update(action_mode=self.env.unwrapped.action_mode, action_mask=self.obs["action_mask"].tolist(),
+                       episode_steps=self.env.unwrapped.episode_steps,
                        original_episode_steps=self.original_episode_steps, length_overridden=self.override)
         return {**self.env.unwrapped.debug_snapshot(), "metrics": metrics}
 
@@ -119,7 +127,7 @@ def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=N
              "input_mode": "realtime_hold_fire"}
     manifest = output / "run.json"
     _atomic_json(manifest, state)
-    print(f"Manual debug: {output}\nHold F: fire | Release F: track | Space: pause/resume | R: restart (runs after warmup)", flush=True)
+    print(f"Manual debug: {output}\nJoint: 1–4 select plate | Hold F: fire | Release F: track | Space: pause/resume | R: restart (runs after warmup)", flush=True)
     closing = threading.Event()
     viewer = watcher = None
     handlers = {}

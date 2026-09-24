@@ -148,8 +148,9 @@ class VisionBridge:
         self._prepared = None
         return result
 
-    def begin_training(self, round_id, start_ns):
-        return self.exchange(dict(op="begin_training", round_id=round_id, start_ns=start_ns))
+    def begin_training(self, round_id, start_ns, *, policy_mode="fire_only"):
+        return self.exchange(dict(op="begin_training", round_id=round_id, start_ns=start_ns,
+                                  policy_mode=policy_mode))
 
     def begin_evaluation(self, round_id, start_ns, end_ns, policy_mode="rule"):
         request = dict(op="begin_evaluation", round_id=round_id, start_ns=start_ns, end_ns=end_ns)

@@ -54,6 +54,7 @@ def make_environment(config, log_dir, monitor_file=None):
     """创建尚未启动的任务环境，每个实例独占一对仿真与视觉桥接进程。"""
     settings = config["environment"]
     kwargs = {key: settings[key] for key in ENV_PATHS if key in settings}
+    kwargs["action_mode"] = settings.get("action_mode", "fire_only")
     if "decision_clock" in settings:
         kwargs["decision_clock"] = settings["decision_clock"]
     rotation = settings.get("task", "static_fire") == "random_rotation_fire"
@@ -64,7 +65,7 @@ def make_environment(config, log_dir, monitor_file=None):
     base = base_class(episode_steps=settings["episode_steps"], log_dir=log_dir, **kwargs)
     env = wrapper(base, settings["scene_seed"], settings["scenario"])
     return Monitor(env, filename=str(monitor_file) if monitor_file else None,
-                   info_keywords=("episode_damage", "actual_shots", "end_reason"))
+                   info_keywords=("episode_damage", "actual_shots", "end_reason", "slot_switches"))
 
 
 def vectorize(env):

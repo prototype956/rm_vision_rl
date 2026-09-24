@@ -61,9 +61,12 @@ def _log_update(model, completed_updates, start_steps, started):
         raise FloatingPointError("non-finite policy parameters")
     episodes = list(model.ep_info_buffer)
     for output, key in (("ep_rew_mean", "r"), ("ep_len_mean", "l"),
-                        ("ep_damage_mean", "episode_damage"), ("actual_shots_mean", "actual_shots")):
-        if episodes:
-            model.logger.record("rollout/" + output, float(np.mean([episode[key] for episode in episodes])))
+                        ("ep_damage_mean", "episode_damage"), ("actual_shots_mean", "actual_shots"),
+                        ("slot_switches_mean", "slot_switches")):
+        # 旧检查点可能保存了尚无选板统计的回合缓存，不把缺失值算作零次切板。
+        values = [episode[key] for episode in episodes if key in episode]
+        if values:
+            model.logger.record("rollout/" + output, float(np.mean(values)))
     elapsed = perf_counter() - started
     model.logger.record("time/fps", (model.num_timesteps - start_steps) / max(elapsed, 1e-9))
     model.logger.record("time/time_elapsed", elapsed)

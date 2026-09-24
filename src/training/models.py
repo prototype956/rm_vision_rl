@@ -17,7 +17,7 @@ import torch
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.policy.observations import SCHEMA, VERSION
+from src.policy.observations import SCHEMA, JOINT_SCHEMA, VERSION
 from src.policy.decision_clock import CONTRACT as CLOCK_CONTRACT
 from src.training.config import ENV_PATHS, validate_config
 
@@ -41,6 +41,10 @@ def observation_contract(env):
     }
     if "decision_clock" in env.observation_space.spaces:
         contract.update(action_version=2, decision_clock=copy.deepcopy(CLOCK_CONTRACT))
+    if env.action_space.n == 9:
+        contract.update(version=2, schema_sha256=_digest(JOINT_SCHEMA), action_version=3,
+                        actions=["hold"] + [f"{kind}_slot_{slot}" for slot in range(4)
+                                             for kind in ("track", "request_fire")])
     return contract
 
 

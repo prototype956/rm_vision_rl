@@ -9,6 +9,7 @@
 | --- | --- |
 | [training/analysis.py](training/analysis.py) | 独立评估已完成训练的检查点、选择最佳模型、组织报告和回放 |
 | [training/report.py](training/report.py) | 生成训练曲线和模型对比 HTML 报告 |
+| [training/compare.py](training/compare.py) | 18 个共同出生场景的联合/两动作策略成对评估、报告与回放 |
 | [training/view.py](training/view.py) | 单模型评估、回放记录和原生窗口显示 |
 | [training/manual.py](training/manual.py) | 人工操作实际 Gym 环境，记录逐步奖励和事件 |
 | [training/diagnose.py](training/diagnose.py) | 从检查点执行短期 PPO 更新并采集学习信号 |
@@ -17,7 +18,8 @@
 ```bash
 python -m tools.training.analysis --run-dir <训练目录> --no-view
 python -m tools.training.view --checkpoint <模型.zip>
-python -m tools.training.manual --config config/training/rotation_fire_ppo.json
+python -m tools.training.manual --config config/training/rotation_joint_ppo.json
+python -m tools.training.compare --checkpoint <联合模型.zip> --baseline-checkpoint <两动作模型.zip>
 python -m tools.training.diagnose --checkpoint <模型.zip> --rollouts 3
 ```
 
@@ -30,3 +32,5 @@ python -m tools.training.diagnose --checkpoint <模型.zip> --rollouts 3
 默认手动环境每回合随机生成原地旋转靶，R 切换下一场景。静止靶仍可显式选择
 `config/training/static_fire_ppo.json`。检查点评估使用保存场景序列的首个参考场景，
 不将单场景分数解释为泛化表现。
+
+默认手动模式用 1–4 选板、F 请求射击，R 换场景。joint 使用 107 维特征和九动作；检查点工具自动选择保存模式。

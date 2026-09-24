@@ -1,18 +1,13 @@
 #include "policy_wire.hpp"
 
 #include <cmath>
-
 #include <nlohmann/json.hpp>
 
 namespace rmvision_rl {
 using Json = nlohmann::json;
 namespace {
-Json Vector(const mv::geometry::Vector3& v) {
-  return {v.x(), v.y(), v.z()};
-}
-Json Age(double value) {
-  return std::isfinite(value) ? Json(value) : Json(nullptr);
-}
+Json Vector(const mv::geometry::Vector3& v) { return {v.x(), v.y(), v.z()}; }
+Json Age(double value) { return std::isfinite(value) ? Json(value) : Json(nullptr); }
 
 }  // namespace
 
@@ -21,7 +16,8 @@ Json Observation(const mv::modules::PolicyObservation& o) {
   const auto& f = o.feedback;
   const auto& r = o.referee;
   Json candidates = Json::array();
-  for (const auto& c : o.candidates) {
+  for (std::size_t i = 0; i < o.candidates.size(); ++i) {
+    const auto& c = o.candidates[i];
     candidates.push_back({{"valid", c.valid},
                           {"slot", c.slot},
                           {"target_world", Vector(c.target_world)},
@@ -29,6 +25,8 @@ Json Observation(const mv::modules::PolicyObservation& o) {
                           {"pitch_rad", c.pitch},
                           {"distance_m", c.distance_m},
                           {"fly_time_s", c.fly_time_s},
+                          {"facing_now_rad", o.facing_now_rad[i]},
+                          {"facing_impact_rad", o.facing_impact_rad[i]},
                           {"prediction_horizon_s", c.prediction_horizon_s}});
   }
   Json covariance = Json::array();
@@ -85,6 +83,7 @@ Json Observation(const mv::modules::PolicyObservation& o) {
           {"feedback_age_s", Age(o.feedback_age_s)},
           {"referee_age_s", Age(o.referee_age_s)},
           {"previous_slot", o.previous_slot},
+          {"selected_slot_age_s", o.selected_slot_age_s},
           {"since_request_s", o.since_request_s ? Json(*o.since_request_s) : Json(nullptr)}};
 }
 }  // namespace rmvision_rl

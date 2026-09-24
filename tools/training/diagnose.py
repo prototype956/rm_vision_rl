@@ -171,7 +171,7 @@ class UpdateTrace:
                     self.pending.append({
                         "rollout": self.rollout, "epoch": (self.batch - 1) // (buffer.buffer_size // self.model.batch_size) + 1,
                         "minibatch": self.batch, "sample_index": int(index), "training_step": self.base_step + int(index) + 1,
-                        "action": int(buffer.actions[index, 0]), "fire_legal": bool(buffer.action_masks[index, 1]),
+                        "action": int(buffer.actions[index, 0]), "fire_legal": bool(buffer.action_masks[index, fire_indices(self.model.action_space.n)].any()),
                         "raw_advantage": float(raw[j]), "normalized_advantage": a,
                         "ratio": ratio, "ratio_outside_clip": abs(ratio - 1) > clip,
                         "surrogate_clipped": (a >= 0 and ratio > 1 + clip) or (a < 0 and ratio < 1 - clip),
@@ -190,11 +190,15 @@ class UpdateTrace:
                 self.flush(False)
 
 
+def fire_indices(action_count):
+    return [1] if action_count == 2 else [2, 4, 6, 8]
+
+
 def probabilities(model, observations, masks):
     with torch.no_grad():
         tensors = {key: torch.as_tensor(value, device=model.device) for key, value in observations.items()}
         distribution = model.policy.get_distribution(tensors, action_masks=masks)
-        return (distribution.distribution.probs[:, 1].cpu().numpy().copy(),
+        return (distribution.distribution.probs[:, fire_indices(model.action_space.n)].sum(dim=1).cpu().numpy().copy(),
                 model.policy.predict_values(tensors).flatten().cpu().numpy().copy())
 
 
@@ -220,7 +224,9 @@ class CaptureRollout(BaseCallback):
                "episode_step": info["episode_steps"], "training_step": self.model.num_timesteps,
                "time_s": info["episode_time_s"], "physical_time_ns": info["physical_time_ns"],
                "action": int(self.locals["actions"][0]),
-               "fire_legal": bool(self.locals["action_masks"][0, 1]),
+               "fire_legal": bool(self.locals["action_masks"][0, fire_indices(self.model.action_space.n)].any()),
+               "fire_action": int(self.locals["actions"][0]) in fire_indices(self.model.action_space.n),
+               "selected_slot": info["selected_slot"], "slot_switched": info["slot_switched"],
                "shot_requested": info["shot_requested"], "shot_accepted": info["shot_accepted"],
                "action_masked": info["action_masked"], "reject_reason": info["reject_reason"],
                "actual_shots": info["actual_shots"], "raw_reward": float(self.locals["rewards"][0]),
@@ -297,7 +303,7 @@ class CaptureRollout(BaseCallback):
         b = self.arrays
         groups = {}
         for i, row in enumerate(self.rows):
-            group = "masked" if not row["fire_legal"] else "fire" if row["action"] else "track"
+            group = "masked" if not row["fire_legal"] else "fire" if row["fire_action"] else "track"
             row.update(group=group, buffer_reward=float(b["rewards"][i]),
                        timeout_bootstrap=float(b["rewards"][i] - row["raw_reward"]),
                        value_before=float(b["values"][i]), value_after=float(v_after[i]),

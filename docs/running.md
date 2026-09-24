@@ -120,7 +120,7 @@ artifacts/venv/bin/python -m src.training.train --help
 
 ```bash
 artifacts/venv/bin/python -m src.training.train \
-  --config config/training/rotation_fire_ppo.json \
+  --config config/training/rotation_joint_ppo.json \
   --output-dir artifacts/training/rotation-v1
 ```
 
@@ -130,7 +130,7 @@ MLP，以及单环境 `DummyVecEnv`。`--timesteps` 覆盖本次预算，向上�
 启动时显示；`--seed` 只改变 PPO 随机种子，场景种子另由配置的 `environment.scene_seed` 控制。
 配置中的相对环境路径相对于本仓库根目录解析。
 
-默认配置为 `config/training/rotation_fire_ppo.json`：每回合重新生成双方位置和朝向、
+默认配置为 `config/training/rotation_joint_ppo.json`：每回合重新生成双方位置和朝向、
 2–8 米目标距离、目标方位，以及双向 1–7 rad/s 的匀速旋转。省略初始云台角度时朝向目标。
 旋转从禁射预热开始，进入正式采样时不重置姿态。出生使用仿真器几何和初始可见性检查；
 非零旋转还需通过每 5° 的整圈可见性采样，避免高台/障碍物只在初始相位短暂露出装甲。
@@ -161,9 +161,10 @@ MLP，以及单环境 `DummyVecEnv`。`--timesteps` 覆盖本次预算，向上�
 手动测试当前配置：
 
 ```bash
-artifacts/venv/bin/python -m tools.training.manual --config config/training/rotation_fire_ppo.json
+artifacts/venv/bin/python -m tools.training.manual --config config/training/rotation_joint_ppo.json
 ```
 
+联合模式先用数字键 1–4 选择对应的槽位 0–3；HUD 显示实际槽位、切板数和九项掩码。
 HUD 显示距下次决策的时间；长按 F 只在到期且原火控合法时提交请求。R 清零奖励、生成并预热下一场景（静止靶配置仍重复相同场景），并切换到下一个时钟随机流。每回合仍为 500 步/5 秒。时钟会跳过部分仍在冷却中的机会，因此启用后持续发射分数可能低于原无时钟的 1380；随机发射伤害也不保证严格按概率缩放。
 
 旧检查点保存的配置没有该对象，`--resume`、`--checkpoint` 回放及手动模式都会保持旧行为；新增观测/动作时序需要新建训练，不能静默改变旧检查点。所有候选模型评估使用各自保存的时钟配置，并从随机流 0 开始。
@@ -369,7 +370,7 @@ artifacts/venv/bin/python -m tools.training.manual \
   --checkpoint artifacts/training/rotation-v1/final.zip
 # 显式延长回合；窗口和运行记录会标注覆盖值
 artifacts/venv/bin/python -m tools.training.manual \
-  --config config/training/rotation_fire_ppo.json --episode-steps 1000
+  --config config/training/rotation_joint_ppo.json --episode-steps 1000
 ```
 
 `--config` 与 `--checkpoint` 互斥，省略时使用默认训练配置。`--checkpoint` 先验证原环境／观测
@@ -535,3 +536,29 @@ session = EvaluationSession(
 
 2026-09-23 的旋转出生可见性修复会改变部分 seed 的接纳结果。旧检查点的观测/动作和
 配置指纹仍兼容，可恢复权重及优化器；修复前后的场景分布不能当作完全一致的评估条件。
+
+## 联合选板模式与成对比较
+
+`rotation_joint_ppo.json` 设定 `environment.action_mode="joint"`：每 10 ms 选择装甲板，
+射击机会保持随机 50–100 ms。预热使用规则且禁射，正式采样由 RL 自主选板，不套用规则面向角门限。
+使用 `--config config/training/rotation_fire_ppo.json` 可新建两动作基线；`--resume` 始终使用保存模式。
+不能把旧两动作权重恢复为联合模型。第一次验证建议 `--timesteps 1024`，新建独立输出目录。
+
+```bash
+artifacts/venv/bin/python -m tools.training.compare \
+  --checkpoint <联合模型.zip> --baseline-checkpoint <旧两动作模型.zip> \
+  --output-dir artifacts/comparison
+```
+
+默认执行 3、5、7 m × -7、-3、-1、1、3、7 rad/s，共 18 个场景，每种策略正式运行 5 秒并自然结算。
+双方复用合法出生种子、场景和时钟；每次运行保留模型快照、实际参数和回放。
+查看 `comparison.html` 或 `comparison.csv`，失败场景有明确状态，不能把部分完成结果解释为完整成绩。
+`tools.training.view --replay <回放.json>` 可打开指定场景，HUD 显示槽位、切板数和协议动作。
+`tools.training.view --checkpoint <模型.zip> --no-view` 只评估并保存参考场景回放，不打开窗口。
+
+手动窗口中 1–4 更新期望槽位，F 请求该槽位射击；未选板时等待。重复选同板即保持。
+非法输入在 Gym 降级并显示掩码原因；R 清除期望槽位并生成下一场景，需要重新按数字键。
+释放 F 不撤回已经接受的脉冲。旧两动作配置无需数字键，沿用 F 和规则选板。
+
+构建更新后的 bridge 与 training_preview 后再运行工具。契约检查：
+`artifacts/venv/bin/python -m unittest discover -s tests -p test_joint_contract.py -v`。

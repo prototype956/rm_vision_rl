@@ -12,20 +12,26 @@ SCHEMA = json.loads(
     (Path(__file__).parents[2] / "config/observations/v1.json").read_text()
 )
 FEATURE_NAMES = SCHEMA["features"]
+JOINT_SCHEMA = json.loads(
+    (Path(__file__).parents[2] / "config/observations/v2.json").read_text()
+)
 
 
-def encode(observation):
+def encode(observation, *, version=VERSION):
     """按固定字段顺序编码观测，排除传输元数据和评估真值。
 
     Args:
         observation: C++ 火控提供的语义观测，包含估计、自身状态和四个候选槽位。
 
     Returns:
-        特征名称、90 个缩放至 [-1, 1] 的 float32 精度数值及九动作布尔掩码。
+        特征名称、v1 的 90 个或 v2 的 107 个 [-1, 1] float32 数值及九动作掩码。
 
     Raises:
         ValueError: 特征非有限、字段长度或顺序不符合 schema，或动作掩码格式错误。
     """
+    if version not in (1, 2):
+        raise ValueError("unsupported feature schema")
+    schema = SCHEMA if version == 1 else JOINT_SCHEMA
     o = observation
     values, names = [], []
     def add(name, value, scale=1.0):
@@ -86,10 +92,17 @@ def encode(observation):
         add(prefix+'pitch_error_rad',c['pitch_rad']-f['pitch_rad'] if valid else 0)
         for key,scale in (('distance_m',10),('fly_time_s',.5),('prediction_horizon_s',.5)):
             add(prefix+key+'_normalized',c[key] if valid else 0,scale)
+    if version == 2:
+        for i, c in enumerate(o['candidates']):
+            for phase in ('facing_now', 'facing_impact'):
+                angle = c[phase + '_rad'] if c['valid'] else 0.0
+                add(f'candidate.{i}.{phase}_sin', math.sin(angle) if c['valid'] else 0.0)
+                add(f'candidate.{i}.{phase}_cos', math.cos(angle) if c['valid'] else 0.0)
+        add('selected_slot_age_s_normalized', o['selected_slot_age_s'] if o['previous_slot'] >= 0 else 0.0)
     mask=o['action_mask']
     if len(mask)!=9 or any(type(v) is not bool for v in mask):
         raise ValueError('nine boolean action-mask entries required')
-    if names != FEATURE_NAMES:
+    if names != schema['features']:
         raise ValueError("feature order differs from frozen schema")
     return names,list(array('f',values)),list(mask)
 
@@ -101,9 +114,11 @@ class TensorPolicy:
     重置时清空历史；无观测周期填零并标记 valid=false。
     本适配器保留原动作掩码和返回动作，由桥接执行动作合法性检查。
     """
-    def __init__(self, actor):
+    def __init__(self, actor, *, version=VERSION):
         self.actor=actor
-        self.feature_count=len(FEATURE_NAMES)
+        self.schema = SCHEMA if version == 1 else JOINT_SCHEMA
+        self.version = version
+        self.feature_count=len(self.schema['features'])
         self.names=None
         self.reset()
 
@@ -132,7 +147,7 @@ class TensorPolicy:
     def __call__(self, observation):
         if not self.pending or self.filled:
             raise RuntimeError('one tensor observation per begun control tick required')
-        names,values,mask=encode(observation)
+        names,values,mask=encode(observation, version=self.version)
         if len(values)!=self.feature_count or (self.names is not None and names!=self.names):
             raise ValueError('feature schema changed')
         self.names=names
@@ -140,5 +155,5 @@ class TensorPolicy:
         self.valid[-1]=True
         self.filled=True
         # 向 actor 提供独立列表，防止其修改后续周期的历史或掩码。
-        return self.actor(dict(version=VERSION,features=[list(v) for v in self.rows],
+        return self.actor(dict(version=self.version,features=[list(v) for v in self.rows],
                                valid=list(self.valid),action_mask=mask))
