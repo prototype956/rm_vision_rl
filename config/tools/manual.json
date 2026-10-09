@@ -1,0 +1,9 @@
+{
+  "mode": "checkpoint",
+  "config": null,
+  "checkpoint": "artifacts/training/joint-factorized-64env-20260927-151917/best.zip",
+  "episode_steps": null,
+  "output_dir": "artifacts/manual",
+  "viewer_binary": null,
+  "scene_seed": null
+}

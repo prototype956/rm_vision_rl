@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RM Vision RL · 训练控制台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">RM VISION RL</p>
+    <h1>训练控制台</h1>
+    <p class="muted">本地单任务训练、恢复、分析和工具任务。数据来自现有训练目录与报告。</p>
+    <nav class="tabs" aria-label="页面导航">
+      <button type="button" class="tab active" data-tab="training-panel">训练与运行</button>
+      <button type="button" class="tab" data-tab="tools-panel">Tools 分析工具</button>
+    </nav>
+  </header>
+
+  <section id="training-panel">
+  <section class="grid two">
+    <form id="new-form" class="card">
+      <h2>新建训练</h2>
+      <label>训练预设<select id="preset" required></select></label>
+      <div class="row">
+        <label>预算类型<select id="budget-mode"><option value="timesteps">总采样步数</option><option value="updates">PPO 更新次数</option></select></label>
+        <label>预算值<input id="budget-value" type="number" min="1" value="1024" required></label>
+      </div>
+      <div class="row">
+        <label>并行环境数<input id="n-envs" type="number" min="1" value="1" required></label>
+        <label>设备<input id="device" value="cpu" required></label>
+      </div>
+      <div class="row">
+        <label>随机种子<input id="seed" type="number" min="0" value="17"></label>
+        <label>每 N 次更新保存<input id="checkpoint-updates" type="number" min="1" value="4"></label>
+      </div>
+      <label class="check"><input id="auto-analysis" type="checkbox"> 完成后自动分析</label>
+      <p id="budget-preview" class="note"></p>
+      <button type="submit">启动训练</button>
+    </form>
+
+    <form id="resume-form" class="card">
+      <h2>继续训练</h2>
+      <label>来源 checkpoint<select id="checkpoint" required></select></label>
+      <div class="row">
+        <label>预算类型<select id="resume-budget-mode"><option value="timesteps">追加采样步数</option><option value="updates">追加 PPO 更新</option></select></label>
+        <label>预算值<input id="resume-budget-value" type="number" min="1" value="1024" required></label>
+      </div>
+      <div class="row">
+        <label>并行环境数<input id="resume-n-envs" type="number" min="1" placeholder="沿用 checkpoint"></label>
+        <label>设备<input id="resume-device" placeholder="沿用 checkpoint"></label>
+      </div>
+      <label class="check"><input id="resume-auto-analysis" type="checkbox"> 完成后自动分析</label>
+      <p class="note">环境、奖励、策略结构和随机种子沿用 checkpoint；恢复训练会创建新的输出目录。</p>
+      <button type="submit">启动恢复训练</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="section-title"><h2>任务与运行</h2><button id="refresh" class="secondary">刷新</button></div>
+    <div id="message" class="message hidden"></div>
+    <div class="table-wrap"><table><thead><tr><th>类型</th><th>标识</th><th>状态</th><th>步数</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="jobs"></tbody></table></div>
+  </section>
+  </section>
+
+  <section id="tools-panel" class="hidden">
+    <section class="card tool-intro">
+      <div class="section-title"><div><h2>Tools</h2><p class="muted">将现有 analysis、compare、diagnose、benchmark 和 view 接入后台任务。结果仍由原工具生成，报告可直接打开。</p></div><button id="refresh-tools" type="button" class="secondary">刷新工具</button></div>
+      <div id="tools-message" class="message hidden"></div>
+    </section>
+
+    <section class="grid two tools-grid">
+      <form id="analysis-form" class="card tool-form">
+        <h2>分析训练结果</h2>
+        <label>训练运行<select id="tool-analysis-run" required></select></label>
+        <div class="row"><label>评估场景数<input id="analysis-scenes" type="number" min="2" value="5"></label><label>设备<input id="analysis-device" placeholder="沿用配置"></label></div>
+        <button type="submit">启动 analysis</button>
+      </form>
+
+      <form id="compare-form" class="card tool-form">
+        <h2>对比 checkpoint</h2>
+        <label>待评估 checkpoint<select id="compare-checkpoint" required></select></label>
+        <label>基线 checkpoint<select id="compare-baseline" required></select></label>
+        <div class="row"><label>设备<input id="compare-device" placeholder="沿用配置"></label><label>并行 worker<input id="compare-workers" type="number" min="1" value="4"></label></div>
+        <button type="submit">启动 compare</button>
+      </form>
+
+      <form id="diagnose-form" class="card tool-form">
+        <h2>诊断 checkpoint</h2>
+        <label>checkpoint<select id="diagnose-checkpoint" required></select></label>
+        <div class="row"><label>rollouts<input id="diagnose-rollouts" type="number" min="1" value="3"></label><label>设备<input id="diagnose-device" placeholder="沿用配置"></label></div>
+        <button type="submit">启动 diagnose</button>
+      </form>
+
+      <form id="benchmark-form" class="card tool-form">
+        <h2>并行度 benchmark</h2>
+        <label>训练预设<select id="benchmark-preset" required></select></label>
+        <label>并行环境数<input id="benchmark-envs" value="1,2,4" required><span class="hint">用逗号分隔，例如 1, 2, 4</span></label>
+        <div class="row"><label>重复次数<input id="benchmark-repeats" type="number" min="1" value="1"></label><label>rollout 模式<select id="benchmark-rollout-mode"><option value="total">总步数</option><option value="per-env">每环境步数</option></select></label></div>
+        <div class="row"><label>预算类型<select id="benchmark-budget-mode"><option value="timesteps">总采样步数</option><option value="updates">PPO 更新次数</option></select></label><label>预算值<input id="benchmark-budget-value" type="number" min="1" value="1024"></label></div>
+        <button type="submit">启动 benchmark</button>
+      </form>
+
+      <form id="view-form" class="card tool-form">
+        <h2>回放 / 评估</h2>
+        <label>checkpoint<select id="view-checkpoint" required></select></label>
+        <div class="row"><label>场景数<input id="view-scene-count" type="number" min="1" value="1"></label><label>并行 worker<input id="view-workers" type="number" min="1" value="1"></label></div>
+        <label>场景 seed（可选，逗号分隔）<input id="view-seeds" placeholder="留空使用默认场景"></label>
+        <label>设备<input id="view-device" placeholder="沿用配置"></label>
+        <p class="note">网页端生成 replay.json / playlist.json 并提供下载链接；原生 training_preview 窗口仍可通过结果中的命令启动。</p>
+        <button type="submit">生成回放 artifact</button>
+      </form>
+
+      <form id="manual-form" class="card tool-form">
+        <h2>手动控制</h2>
+        <label>训练预设<select id="manual-preset" required></select></label>
+        <label>checkpoint（可选）<select id="manual-checkpoint"><option value="">从随机策略开始</option></select></label>
+        <div class="row"><label>episode 步数<input id="manual-episode-steps" type="number" min="1" value="600"></label><label>场景 seed<input id="manual-scene-seed" type="number" min="0" value="0"></label></div>
+        <p class="note">manual 需要本机 DISPLAY/WAYLAND 和 training_preview。任务会在后台启动，浏览器不承载实时画面。</p>
+        <button type="submit">启动 native manual</button>
+      </form>
+    </section>
+  </section>
+
+  <section id="detail" class="card hidden">
+    <div class="section-title"><h2>详情</h2><button id="close-detail" class="secondary">关闭</button></div>
+    <pre id="detail-json" class="json"></pre>
+    <h3>日志</h3>
+    <pre id="detail-log" class="log"></pre>
+    <div id="detail-links"></div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

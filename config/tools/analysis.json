@@ -1,0 +1,7 @@
+{
+  "run_dir": "artifacts/training/joint-factorized-64env-20260927-151917",
+  "device": "cpu",
+  "evaluation_scenes": 5,
+  "viewer_binary": null,
+  "open_view": false
+}

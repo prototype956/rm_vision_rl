@@ -33,6 +33,7 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 | [environment/evaluation.py](../src/environment/evaluation.py) | `EvaluationSession`：预热、正式窗口和尾部结算生命周期 |
 | [environment/fire.py](../src/environment/fire.py) | `FireEnv`：规则两动作/联合九动作 Gym 采样、时间截断和独立进程生命周期；静止/旋转子类提供场景规则 |
 | [training/environment.py](../src/training/environment.py) | 任务与场景序列适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
+| [training/parallel.py](../src/training/parallel.py) | 多环境 SubprocVecEnv、独立随机流、进程与日志隔离、有界回收 |
 | [training/models.py](../src/training/models.py) | 模型构建/加载、观测契约及配置指纹、原子检查点 |
 | [training/train.py](../src/training/train.py) | 训练预算、完整更新、日志、周期保存和运行生命周期 |
 | [policy/observations.py](../src/policy/observations.py) | `encode` / `TensorPolicy`：语义字段编码、8 个控制周期的历史和有效性标记 |
@@ -52,12 +53,16 @@ Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
 
 ## PPO 与未来循环策略
 
-当前配置显式使用 `algorithm=maskable_ppo`、`policy_kind=mlp`。模型构建/加载集中在
+当前配置使用 `algorithm=maskable_ppo`，支持固定槽位的 `mlp`、分解选板的
+`factorized_mlp` 和候选共享评分的 `shared_score_mlp`。模型构建/加载集中在
 `training.models`；Gym 和传输不依赖 PyTorch。`MultiInputPolicy` 在特征提取内部展平历史，
 环境输出 fire_only 的 `[8,90]` 或 joint 的 `[8,107]`，不额外做观测或奖励归一化。场景种子独立于 PPO seed。旋转任务在每次自动 Reset 采样下一场景；
-静止任务重用场景种子和参数，也会重复测量噪声。单参考场景评估不代表泛化效果。
+静止任务重用场景种子和参数，也会重复测量噪声。训练后选优使用多个共享随机场景的平均表现，
+仍不代表更大范围的泛化效果。
 
-单环境 `DummyVecEnv` 保留终止观测和 `TimeLimit.truncated`，MaskablePPO 负责价值自举。
+单环境 `DummyVecEnv` 和多环境 `SubprocVecEnv` 均保留终止观测和 `TimeLimit.truncated`，
+MaskablePPO 负责价值自举。多环境各自运行完整仿真与视觉桥接，主进程批量推理并同步收集结果；
+每次 PPO 更新的样本数是 `n_steps × n_envs`。物理仍以 1 ms 步长推进。
 Monitor 在此之前记录原始伤害奖励，不把价值估计记成实际伤害。训练端每次只请求一个完整
 rollout 的 `learn(reset_num_timesteps=False)`，保持当前观测和优化器连续；固定学习率与
 clip 参数没有分段调度问题。更新结束后才记录损失并允许保存检查点。

@@ -1,5 +1,6 @@
 """通过原生窗口按键操作真实 PPO Gym 环境，支持按住按键持续请求射击。"""
 import argparse
+import copy
 from contextlib import ExitStack
 import csv
 import json
@@ -11,7 +12,9 @@ import tempfile
 import threading
 
 from src.training.config import DEFAULT_CONFIG, ROOT, read_config, validate_config
+from tools.config import load_tool_config, write_effective_config
 from src.training.environment import make_environment
+from src.training.paths import ensure_episode_directories, monitor_path
 from tools.training.view import _atomic_json
 
 
@@ -27,10 +30,11 @@ CSV_FIELDS = ("episode", "step", "time_s", "action", "fire_legal_before", "fire_
 class ManualSession:
     """每个协议请求恰好执行一次 Gym 操作，重置必须由调用方显式请求。"""
 
-    def __init__(self, env, writer, file, *, original_episode_steps, override=False):
+    def __init__(self, env, writer, file, *, original_episode_steps, override=False, model=None):
         self.env, self.writer, self.file = env, writer, file
+        self.model = model
         self.original_episode_steps, self.override = original_episode_steps, override
-        self.episode, self.step, self.total = 0, 0, 0.0
+        self.episode, self.step, self.total, self.hits = 0, 0, 0.0, 0
         self.last_reward, self.last_step = None, None
         self.done, self.obs = True, None
 
@@ -44,13 +48,18 @@ class ManualSession:
             self.obs, info = self.env.reset()
             self.episode += 1
             self.step, self.total = 0, 0.0
-            self.last_reward, self.last_step = None, None
+            self.last_reward, self.last_step, self.hits = None, None, 0
             self.done = False
             reward, action, before, terminated, truncated = 0.0, None, None, False, False
         elif operation == "step":
             if self.done:
                 raise ValueError("episode ended or not started; reset before stepping")
             action = request.get("action")
+            if self.model is not None:
+                action, _ = self.model.predict(
+                    self.obs, deterministic=True,
+                    action_masks=self.obs["action_mask"].astype(bool, copy=True))
+                action = int(action.item())
             if type(action) is not int or not self.env.action_space.contains(action):
                 raise ValueError("manual action must be in the configured action space")
             before = self.fire_legal()
@@ -63,11 +72,16 @@ class ManualSession:
             self.done = terminated or truncated
         else:
             raise ValueError(f"unknown manual operation: {operation}")
+        snapshot = self.env.unwrapped.debug_snapshot()
+        self.hits += sum(
+            1 for event in snapshot["data"]["events"]
+            if event.get("kind") == "damage_applied" and event.get("data", {}).get("actual", 0) > 0)
         metrics = dict(episode=self.episode, step=self.step, time_s=info["episode_time_s"], action=action,
                        fire_legal_before=before, fire_legal_next=self.fire_legal(),
                        action_masked=info["action_masked"], shot_requested=info["shot_requested"],
                        shot_accepted=info["shot_accepted"], reject_reason=info["reject_reason"],
-                       actual_shots=info["actual_shots"], reward=reward, cumulative_reward=self.total,
+                       actual_shots=info["actual_shots"], damaging_rounds=self.hits,
+                       raw_damage=info["episode_damage"], reward=reward, cumulative_reward=self.total,
                        last_nonzero_reward=self.last_reward, last_nonzero_step=self.last_step,
                        terminated=bool(terminated), truncated=bool(truncated), end_reason=info["end_reason"])
         clock = info.get("decision_clock") or {}
@@ -85,7 +99,7 @@ class ManualSession:
         metrics.update(action_mode=self.env.unwrapped.action_mode, action_mask=self.obs["action_mask"].tolist(),
                        episode_steps=self.env.unwrapped.episode_steps,
                        original_episode_steps=self.original_episode_steps, length_overridden=self.override)
-        return {**self.env.unwrapped.debug_snapshot(), "metrics": metrics}
+        return {**snapshot, "metrics": metrics}
 
 
 def _viewer_environment(binary):
@@ -97,13 +111,18 @@ def _viewer_environment(binary):
     return env
 
 
-def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=None, viewer_binary=None):
-    from src.training.models import read_checkpoint_metadata, training_metadata
+def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=None,
+               viewer_binary=None, scene_seed=None):
+    from src.training.models import load_model, read_checkpoint_metadata, training_metadata
 
     if config is not None and checkpoint is not None:
         raise ValueError("choose config or checkpoint")
     saved = read_checkpoint_metadata(checkpoint) if checkpoint is not None else None
     config = validate_config(saved["config"]) if saved else (read_config() if config is None else validate_config(config))
+    if scene_seed is not None:
+        config = copy.deepcopy(config)
+        config["environment"]["scene_seed"] = scene_seed
+        config = validate_config(config)
     original_steps = config["environment"]["episode_steps"]
     if episode_steps is not None:
         if type(episode_steps) is not int or episode_steps < 1:
@@ -124,10 +143,13 @@ def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=N
     output = Path(tempfile.mkdtemp(prefix="manual-", dir=parent))
     state = {"version": VERSION, "status": "starting", "checkpoint": str(Path(checkpoint).resolve()) if saved else None,
              "original_episode_steps": original_steps, "episode_steps_override": episode_steps, "config": config,
-             "input_mode": "realtime_hold_fire"}
+             "input_mode": "realtime_policy" if saved else "realtime_hold_fire"}
     manifest = output / "run.json"
     _atomic_json(manifest, state)
-    print(f"Manual debug: {output}\nJoint: 1–4 select plate | Hold F: fire | Release F: track | Space: pause/resume | R: restart (runs after warmup)", flush=True)
+    if saved:
+        print(f"Live inference: {output}\nModel: {Path(checkpoint).resolve()} | ↑: next random seed | Space: pause/resume", flush=True)
+    else:
+        print(f"Manual debug: {output}\nJoint: 1–4 select plate | Hold F: fire | Release F: track | Space: pause/resume | R: restart (runs after warmup)", flush=True)
     closing = threading.Event()
     viewer = watcher = None
     handlers = {}
@@ -155,8 +177,13 @@ def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=N
             config = metadata["config"]
             if episode_steps is not None:
                 config["environment"]["episode_steps"] = episode_steps
-            env = make_environment(config, output / "environment", output / "episodes.monitor.csv")
+            ensure_episode_directories(output)
+            env = make_environment(config, output / "environment", monitor_path(output, 1))
             stack.callback(env.close)
+            model = None
+            if saved:
+                model, _ = load_model(checkpoint, env)
+                model.policy.set_training_mode(False)
             state.update(config=config, status="ready")
             _atomic_json(manifest, state)
             log = stack.enter_context((output / "viewer.log").open("w"))
@@ -165,11 +192,14 @@ def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=N
             writer.writeheader()
             csv_file.flush()
             session = ManualSession(env, writer, csv_file, original_episode_steps=original_steps,
-                                    override=episode_steps is not None)
+                                    override=episode_steps is not None, model=model)
             base = env.unwrapped
-            viewer = subprocess.Popen([str(binary), "--manual", "--config", str(base.simulator_config),
-                                       "--assets", str(base.simulator_root / "assets")], cwd=base.simulator_root,
-                                      env=viewer_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            viewer_args = [str(binary), "--manual", "--config", str(base.simulator_config),
+                           "--assets", str(base.simulator_root / "assets")]
+            if saved:
+                viewer_args.append("--auto-policy")
+            viewer = subprocess.Popen(viewer_args, cwd=base.simulator_root, env=viewer_env,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=log, text=True, bufsize=1)
 
             def watch_exit():
@@ -244,16 +274,28 @@ def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=N
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group()
-    source.add_argument("--config", type=Path)
-    source.add_argument("--checkpoint", type=Path, help="use saved environment contract; no policy inference")
+    parser.add_argument("--config", type=Path, help="tool configuration JSON")
+    parser.add_argument("--training-config", type=Path, help="training environment JSON for config mode")
+    parser.add_argument("--checkpoint", type=Path, help="load the saved environment contract and policy")
     parser.add_argument("--episode-steps", type=int, help="explicit episode length override (10 ms per step)")
     parser.add_argument("--output-dir", type=Path, help="parent directory for a unique debug session")
     parser.add_argument("--viewer-binary", type=Path)
+    parser.add_argument("--scene-seed", type=int, help="initial random scene seed")
     args = parser.parse_args()
-    output = run_manual(None if args.checkpoint else read_config(args.config or DEFAULT_CONFIG),
-                        checkpoint=args.checkpoint, episode_steps=args.episode_steps,
-                        output_dir=args.output_dir, viewer_binary=args.viewer_binary)
+    overrides = {key: getattr(args, key) for key in
+                 ("checkpoint", "episode_steps", "output_dir", "viewer_binary", "scene_seed")
+                 if getattr(args, key) is not None}
+    if args.checkpoint is not None:
+        overrides.update(mode="checkpoint", checkpoint=str(args.checkpoint), config=None)
+    if args.training_config is not None:
+        overrides.update(mode="config", config=str(args.training_config), checkpoint=None)
+    config = load_tool_config("manual", args.config, overrides)
+    training_config = read_config(config["config"]) if config["mode"] == "config" else None
+    output = run_manual(config=training_config,
+                        checkpoint=config["checkpoint"] if config["mode"] == "checkpoint" else None,
+                        episode_steps=config["episode_steps"], output_dir=config["output_dir"],
+                        viewer_binary=config["viewer_binary"], scene_seed=config["scene_seed"])
+    write_effective_config(output / "tool_config.json", config)
     return 1 if json.loads((output / "run.json").read_text())["status"] == "failed" else 0
 
 

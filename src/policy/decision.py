@@ -16,7 +16,8 @@ class DecisionPolicy(TensorPolicy):
     bridge_mode = "nine"
     fire_actions = (2, 4, 6, 8)
 
-    def __init__(self, actor=None, *, decision_clock=None, version=2):
+    def __init__(self, actor=None, *, decision_clock=None, version=2, selection_memory=False):
+        self.selection_memory = selection_memory
         self.decision_actor = actor
         self.clock = DecisionClock(decision_clock)
         super().__init__(self._act, version=version)
@@ -29,19 +30,48 @@ class DecisionPolicy(TensorPolicy):
 
     def reset(self):
         super().reset()
+        self.return_slot = self._last_selected = -1
+        self.generation_changed = False
         self._clear_actions()
 
     def begin_step(self):
+        if not self.filled:
+            self.return_slot = self._last_selected = -1
         super().begin_step()
         self._clear_actions()
+
+    def set_generation(self, generation):
+        changed = self.generation is not None and generation != self.generation
+        super().set_generation(generation)
+        self.generation_changed = changed
 
     def observation(self):
         result = dict(features=np.array(self.rows, dtype=np.float32),
                       valid=np.array(self.valid, dtype=np.int8),
                       action_mask=self.mask.astype(np.int8, copy=True))
+        if self.selection_memory:
+            result['selection_memory'] = np.array(
+                [self.return_slot == slot for slot in range(-1, 4)], dtype=np.int8)
         if self.clock.enabled:
             result['decision_clock'] = self.clock.observation()
         return result
+
+    def __call__(self, observation):
+        # Derive memory from confirmed controller selection, never from requested actions.
+        # Clear on lost/invalid candidates so recovery is not treated as oscillation.
+        if self.selection_memory:
+            slot = observation['previous_slot']
+            valid = [c['valid'] for c in observation['candidates']]
+            reliable = observation['estimate']['state'] == 'tracking'
+            if not reliable or slot < 0 or not valid[slot]:
+                self.return_slot = self._last_selected = -1
+            else:
+                if self._last_selected >= 0 and slot != self._last_selected:
+                    self.return_slot = self._last_selected if valid[self._last_selected] else -1
+                if self.return_slot >= 0 and not valid[self.return_slot]:
+                    self.return_slot = -1
+                self._last_selected = slot
+        return super().__call__(observation)
 
     def requests_fire(self, action):
         return action in self.fire_actions
@@ -76,9 +106,11 @@ class JointFirePolicy(DecisionPolicy):
     """四槽位直接选择与单发请求；不调用规则选板器。"""
 
 
-def make_policy(action_mode='fire_only', actor=None, *, decision_clock=None):
+def make_policy(action_mode='fire_only', actor=None, *, decision_clock=None, selection_memory=False):
+    if type(selection_memory) is not bool or (selection_memory and action_mode != 'joint'):
+        raise ValueError('selection_memory requires joint mode and a boolean value')
     if action_mode == 'joint':
-        return JointFirePolicy(actor, decision_clock=decision_clock)
+        return JointFirePolicy(actor, decision_clock=decision_clock, selection_memory=selection_memory)
     if action_mode == 'fire_only':
         from src.policy.static_fire import StaticFirePolicy
         return StaticFirePolicy(actor, decision_clock=decision_clock)

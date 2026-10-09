@@ -6,7 +6,9 @@ from html import escape
 import json
 from io import BytesIO
 import hashlib
+import multiprocessing
 from pathlib import Path
+import signal
 import tempfile
 
 import numpy as np
@@ -17,17 +19,57 @@ from src.training.environment import make_environment
 from src.training.models import read_checkpoint_metadata, load_model
 from src.transport.processes import training_worker
 from tools.training.view import _atomic_json, evaluate_checkpoint
+from tools.config import load_tool_config, write_effective_config
 
 
-def compare_checkpoints(checkpoint, baseline_checkpoint, *, output_dir=None, device=None):
+def _prepare_worker():
+    """父进程统一处理中断；终止 worker 时让评估上下文回收原生子进程。"""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt(f"comparison worker signal {signum}")
+
+    signal.signal(signal.SIGTERM, stop)
+
+
+def _evaluate_case(task):
+    """同一场景的两个模型顺序运行；不同场景通过 spawn 进程隔离。"""
+    case, checkpoints, output, device = task
+    index = case["scene_id"]
+    override = {key: case[key] for key in ("scene_id", "scenario", "spawn_seed")}
+    results = {}
+    for key, path in checkpoints.items():
+        print(f"Scene {index + 1}/18: {case['distance_m']} m, "
+              f"{case['angular_speed_rad_s']:+} rad/s, {key}", flush=True)
+        try:
+            replay_path = evaluate_checkpoint(
+                path, output_dir=output / f"scene-{index:02d}" / key,
+                device=device, scene_override=override)
+            replay = json.loads(replay_path.read_text())
+            if replay["scenario"] != case["resolved_scenario"]:
+                raise RuntimeError("resolved scene differs from the shared spawn")
+            results[key] = {**replay["summary"], "replay": str(replay_path)}
+        except Exception as error:
+            results[key] = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
+    return index, results
+
+
+def compare_checkpoints(checkpoint, baseline_checkpoint, *, output_dir=None, device=None,
+                        workers=1):
+    """固定场景成对评估；workers 控制同时运行的场景数，默认串行。"""
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer")
     checkpoints = {"joint": Path(checkpoint).resolve(), "baseline": Path(baseline_checkpoint).resolve()}
     checkpoint_data = {key: path.read_bytes() for key, path in checkpoints.items()}
     metadata = {key: read_checkpoint_metadata(BytesIO(data)) for key, data in checkpoint_data.items()}
     configs = {key: item["config"] for key, item in metadata.items()}
     settings = {key: value["environment"] for key, value in configs.items()}
-    if (settings["joint"].get("action_mode", "fire_only") != "joint"
-            or settings["baseline"].get("action_mode", "fire_only") != "fire_only"):
-        raise ValueError("comparison requires a joint checkpoint and a fire-only baseline")
+    joint_mode = settings["joint"].get("action_mode", "fire_only")
+    baseline_mode = settings["baseline"].get("action_mode", "fire_only")
+    if joint_mode not in ("joint", "fire_only") or baseline_mode not in ("joint", "fire_only"):
+        raise ValueError("comparison checkpoints have unsupported action modes")
+    if joint_mode != baseline_mode and (joint_mode, baseline_mode) != ("joint", "fire_only"):
+        raise ValueError("comparison requires matching action modes or a joint checkpoint with a fire-only baseline")
     # 配置差异必须显式解决，不能悄悄替换检查点训练时的物理或视觉参数。
     for key in ("simulator_config", "vision_config"):
         if metadata["joint"]["fingerprints"][key] != metadata["baseline"]["fingerprints"][key]:
@@ -40,7 +82,8 @@ def compare_checkpoints(checkpoint, baseline_checkpoint, *, output_dir=None, dev
     parent = Path(output_dir or ROOT / "artifacts/comparison").resolve()
     parent.mkdir(parents=True, exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="compare-", dir=parent))
-    report = {"version": 1, "checkpoints": {k: str(v) for k, v in checkpoints.items()},
+    report = {"version": 1, "status": "running", "workers": workers,
+              "checkpoints": {k: str(v) for k, v in checkpoints.items()},
               "sha256": {key: hashlib.sha256(data).hexdigest() for key, data in checkpoint_data.items()},
               "cases": [], "aggregate": {}, "paired_aggregate": {}}
     for key, data in checkpoint_data.items():
@@ -80,21 +123,34 @@ def compare_checkpoints(checkpoint, baseline_checkpoint, *, output_dir=None, dev
                         case["spawn_error"] = f"{type(error).__name__}: {error}"
                         _atomic_json(output / "comparison.json", report)
                         continue
-                    override = {key: case[key] for key in ("scene_id", "scenario", "spawn_seed")}
-                    for key, path in checkpoints.items():
-                        print(f"Scene {index + 1}/18: {distance} m, {speed:+} rad/s, {key}", flush=True)
-                        try:
-                            replay_path = evaluate_checkpoint(path, output_dir=output / f"scene-{index:02d}" / key,
-                                                              device=device, scene_override=override)
-                            replay = json.loads(replay_path.read_text())
-                            if replay["scenario"] != case["resolved_scenario"]:
-                                raise RuntimeError("resolved scene differs from the shared spawn")
-                            case["results"][key] = {**replay["summary"], "replay": str(replay_path)}
-                        except Exception as error:
-                            case["results"][key] = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
-                        _atomic_json(output / "comparison.json", report)
+                    _atomic_json(output / "comparison.json", report)
     finally:
         env.close()
+    tasks = [(case, checkpoints, output, device) for case in report["cases"]
+             if "spawn_error" not in case]
+    pool = None
+    try:
+        if workers > 1 and tasks:
+            pool = multiprocessing.get_context("spawn").Pool(
+                min(workers, len(tasks)), initializer=_prepare_worker)
+            completed = pool.imap_unordered(_evaluate_case, tasks, chunksize=1)
+        else:
+            completed = map(_evaluate_case, tasks)
+        for index, results in completed:
+            report["cases"][index]["results"] = results
+            _atomic_json(output / "comparison.json", report)
+            print(f"Finished scene {index + 1}/18", flush=True)
+        if pool is not None:
+            pool.close()
+            pool.join()
+    except BaseException as error:
+        report.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                      error=f"{type(error).__name__}: {error}")
+        _atomic_json(output / "comparison.json", report)
+        if pool is not None:
+            pool.terminate()
+            pool.join()
+        raise
     paired = [case for case in report["cases"] if all(
         case["results"].get(key, {}).get("status") == "complete" for key in checkpoints)]
     for key in checkpoints:
@@ -136,13 +192,29 @@ def compare_checkpoints(checkpoint, baseline_checkpoint, *, output_dir=None, dev
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--checkpoint', required=True, type=Path)
-    parser.add_argument('--baseline-checkpoint', required=True, type=Path)
+    parser.add_argument('--config', type=Path, help='tool configuration JSON')
+    parser.add_argument('--checkpoint', type=Path)
+    parser.add_argument('--baseline-checkpoint', type=Path)
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--device')
+    parser.add_argument('--workers', type=int)
     args = parser.parse_args()
-    output = compare_checkpoints(args.checkpoint, args.baseline_checkpoint,
-                                 output_dir=args.output_dir, device=args.device)
+    overrides = {key: getattr(args, key) for key in
+                 ('checkpoint', 'baseline_checkpoint', 'output_dir', 'device', 'workers')
+                 if getattr(args, key) is not None}
+    config = load_tool_config('compare', args.config, overrides)
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt(f"comparison signal {signum}")
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        output = compare_checkpoints(config['checkpoint'], config['baseline_checkpoint'],
+                                     output_dir=config['output_dir'], device=config['device'],
+                                     workers=config['workers'])
+        write_effective_config(output / 'tool_config.json', config)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     return 0 if json.loads((output / 'comparison.json').read_text())['status'] == 'complete' else 1
 
 

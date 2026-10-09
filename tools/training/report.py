@@ -1,6 +1,6 @@
 """根据完整回合的 Monitor 日志和逐次更新的 CSV 日志生成离线 Plotly 报告。
 
-奖励、伤害、发射数及 PPO 指标按训练步数展示；检查点评估伤害作为离散评估点展示。
+奖励、伤害、发射数及 PPO 指标按训练步数展示；检查点评估的多场景平均归属伤害作为离散评估点展示。
 保留原始回合曲线并叠加最近 20 回合的均值。用蓝色、金色及不同线型和标记区分
 Final/Best，表格提供精确数值。
 """
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 
+from src.training.paths import monitor_paths
 
 BLUE, GOLD, MUTED = "#2463a6", "#ac7617", "#a6b8cb"
 STATUS = {"complete": "完成", "partial": "部分候选失败", "failed": "失败", "incomplete": "结算不完整",
@@ -47,19 +48,25 @@ def read_curves(output, run):
             warnings.append("恢复训练缺少起始步数，无法定位回合曲线；PPO 曲线仍使用日志中的累计步数。")
         else:
             step = 0
-    for row in _read_csv(output / "episodes.monitor.csv", warnings):
-        length = _number(row.get("l"))
-        if step is None:
-            break
-        if length is None or length <= 0 or not length.is_integer():
-            warnings.append("回合长度缺失或无效：此行及后续回合不绘制，避免累计步数错位。")
-            break
-        step += int(length)
-        if step > run.get("last_completed_timesteps", math.inf):
-            warnings.append("回合步数超出训练完成位置，后续回合不绘制。")
-            break
-        episodes.append({"step": step, **{key: _number(row.get(key))
-                                         for key in ("r", "episode_damage", "actual_shots")}})
+    n_envs = run.get("config", {}).get("n_envs", 1)
+    paths = monitor_paths(output, n_envs)
+    for path in paths:
+        worker_step = step
+        for row in _read_csv(path, warnings):
+            length = _number(row.get("l"))
+            if worker_step is None:
+                break
+            if length is None or length <= 0 or not length.is_integer():
+                warnings.append(f"{path.name} 回合长度无效：此行及后续回合不绘制。")
+                break
+            # 同步向量采样每次推进全部环境；该 worker 的累计长度映射到全局样本数。
+            worker_step += int(length) * n_envs
+            if worker_step > run.get("last_completed_timesteps", math.inf):
+                warnings.append(f"{path.name} 回合步数超出训练完成位置，后续回合不绘制。")
+                break
+            episodes.append({"step": worker_step, **{key: _number(row.get(key))
+                                                    for key in ("r", "episode_damage", "actual_shots")}})
+    episodes.sort(key=lambda row: row["step"])
     updates = _read_csv(output / "logs/progress.csv", warnings)
     return episodes, updates, warnings
 
@@ -134,15 +141,16 @@ def write_report(output, state, run):
     items = [item for item in state["candidates"] if item["status"] != "duplicate"
              and item["num_timesteps"] is not None]
     series = [{"x": [item["num_timesteps"] for item in items],
-               "y": [item["official_damage"] for item in items], "name": "完整评估伤害",
+               "y": [item["official_damage"] for item in items], "name": "多场景平均归属伤害",
                "dash": "dot"}]
     for role, item, color, symbol in (("Best", best, GOLD, "diamond-open"),
                                      ("Final", final, BLUE, "circle-open")):
         if item and item["official_damage"] is not None:
             series.append({"x": [item["num_timesteps"]], "y": [item["official_damage"]],
                            "name": role, "color": color, "mode": "markers", "size": 14, "symbol": symbol})
-    chart("独立评估伤害与模型位置", "每个点为一个已保存模型的一次确定性评估；同场景、同种子、同窗口。缺失点不参与选优，连线只辅助定位。",
-          series, "完整窗口归属伤害", evaluation=True)
+    chart("多场景平均评估伤害与模型位置",
+          "每个点为一个已保存模型在共享随机场景集合上的平均归属伤害；缺失点不参与选优，连线只辅助定位。",
+          series, "平均窗口归属伤害", evaluation=True)
     for metric, title in (("policy_gradient_loss", "PPO 策略损失"), ("value_loss", "PPO 价值损失"),
                           ("entropy_loss", "PPO 熵损失"), ("approx_kl", "PPO 近似 KL"),
                           ("explained_variance", "PPO 解释方差")):
@@ -187,12 +195,12 @@ td:last-child{{white-space:normal;min-width:100px}}thead{{background:#f4f6f9}}.w
 <p>{escape(outcome)} · {escape(STATUS.get(state['status'], state['status']))}{' · Final 与 Best 为同一模型' if same else ''}</p>
 <p class="note">训练目录：<code>{escape(state['run_dir'])}</code><br>分析时间：{escape(state['created_at'])}</p></header>
 {warnings_html}
-<section><h2>最终与最佳模型</h2><p class="note">按完整窗口归属伤害选优，同分优先累计步数较大的模型。命中率＝造成伤害的弹丸数／窗口内实际出膛数；无出膛为“—”。</p>
-<div class="table-wrap"><table><thead><tr><th>角色</th><th>来源模型</th><th>累计步数</th><th>归属伤害</th><th>命中率</th><th>出膛数</th></tr></thead><tbody>{comparison}</tbody></table></div></section>
-<section><h2>全部候选与排名</h2><div class="table-wrap"><table><thead><tr><th>排名</th><th>来源模型</th><th>累计步数</th><th>归属伤害</th><th>命中率</th><th>出膛数</th><th>状态</th><th>说明</th></tr></thead><tbody>{''.join(ranking)}</tbody></table></div></section>
+<section><h2>最终与最佳模型</h2><p class="note">按 {escape(str(state.get('evaluation_scenes', '多')))} 个共享随机场景的平均归属伤害选优，同分优先累计步数较大的模型。命中率＝造成伤害的弹丸数／窗口内实际出膛数；无出膛为“—”。</p>
+<div class="table-wrap"><table><thead><tr><th>角色</th><th>来源模型</th><th>累计步数</th><th>平均归属伤害</th><th>命中率</th><th>出膛数</th></tr></thead><tbody>{comparison}</tbody></table></div></section>
+<section><h2>全部候选与排名</h2><div class="table-wrap"><table><thead><tr><th>排名</th><th>来源模型</th><th>累计步数</th><th>平均归属伤害</th><th>命中率</th><th>出膛数</th><th>状态</th><th>说明</th></tr></thead><tbody>{''.join(ranking)}</tbody></table></div></section>
 {''.join(parts)}
-<footer><p>范围：仅本次训练目录的已保存检查点；单个参考场景的结果不代表跨场景泛化表现。训练奖励与独立窗口结算伤害口径不同。</p>
-<p>数据来源：本分析目录中的 episodes.monitor.csv、logs/progress.csv 和 evaluation/ 回放；模型、摘要及状态见 <a href="analysis.json">analysis.json</a>。
+<footer><p>范围：仅本次训练目录的已保存检查点；平均值只覆盖本次共享随机场景集合，不代表更大范围的泛化表现。训练奖励与独立窗口结算伤害口径不同。</p>
+<p>数据来源：本分析目录中的 episodes/monitors/*.monitor.csv、logs/progress.csv 和 evaluation/ 回放；模型、摘要及状态见 <a href="analysis.json">analysis.json</a>。
 累计步数包含恢复训练的起始偏移，仅绘制完整回合。未记录的指标不补零。</p>
 <p>操作：悬停查看数值，拖动框选缩放，双击复位，点击图例隐藏／显示曲线。报告内嵌 Plotly，可离线打开。</p></footer>
 </main></body></html>"""

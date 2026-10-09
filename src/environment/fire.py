@@ -32,7 +32,7 @@ class FireEnv(gym.Env):
     def __init__(self, *, simulator_root=None, vision_root=None, simulator_binary=None,
                  bridge_binary=None, simulator_config=None, log_dir=None,
                  episode_steps=3000, warmup_config=None, render_mode=None, decision_clock=None,
-                 action_mode="fire_only"):
+                 action_mode="fire_only", selection_memory=False):
         super().__init__()
         if render_mode is not None:
             raise ValueError("FireEnv only supports render_mode=None")
@@ -52,13 +52,16 @@ class FireEnv(gym.Env):
         self.warmup_config = warmup_config or WarmupConfig()
         self.render_mode = None
         self.action_mode = action_mode
-        self._history = make_policy(action_mode, decision_clock=decision_clock)
+        self._history = make_policy(action_mode, decision_clock=decision_clock,
+                                    selection_memory=selection_memory)
         self.action_space = spaces.Discrete(self._history.action_count)
         self.observation_space = spaces.Dict({
             "features": spaces.Box(-1.0, 1.0, (HISTORY, self._history.feature_count), np.float32),
             "valid": spaces.MultiBinary(HISTORY),
             "action_mask": spaces.MultiBinary(int(self.action_space.n)),
         })
+        if selection_memory:
+            self.observation_space.spaces["selection_memory"] = spaces.MultiBinary(5)
         if self._history.clock.enabled:
             self.observation_space.spaces["decision_clock"] = spaces.Box(
                 np.zeros(5, dtype=np.float32), np.array([1, 60, 60, 60, 60], dtype=np.float32))
@@ -237,6 +240,26 @@ class FireEnv(gym.Env):
             result["physical_fire_legal_next"] = self._history.physical_fire_action is not None
         return result
 
+    def _switch_reward_context(self):
+        """切板奖励的动作前上下文，仅使用视觉估计及自身控制状态，单位 rad/s、s。"""
+        if self._prepared.get("kind") != "policy_observation":
+            return None
+        observation = self._prepared["observation"]
+        slot = observation["previous_slot"]
+        context = dict(previous_slot=slot,
+                    previous_valid=slot >= 0 and observation["candidates"][slot]["valid"],
+                    yaw_velocity_rad_s=observation["estimate"]["yaw_velocity_rad_s"],
+                    selected_slot_age_s=observation["selected_slot_age_s"],
+                    track_generation=self._prepared["metadata"]["track_generation"])
+        if self._history.selection_memory:
+            context.update(return_slot=self._history.return_slot,
+                           generation_changed=self._history.generation_changed,
+                           tracking_reliable=observation["estimate"]["state"] == "tracking",
+                           candidate_valid=[bool(c["valid"]) for c in observation["candidates"]],
+                           facing_impact_rad=[c["facing_impact_rad"] if c["valid"] else 0.0
+                                              for c in observation["candidates"]])
+        return context
+
     def step(self, action):
         """执行一个策略决策，推进 10 ms 并准备下一观测。
 
@@ -256,6 +279,7 @@ class FireEnv(gym.Env):
             raise ValueError(f"action must be an integer in [0,{self.action_space.n - 1}]")
         action = int(action)
         try:
+            switch_context = self._switch_reward_context()
             clock_before = self._history.clock.info()
             physical_fire_legal = self._history.physical_fire_action is not None
             executed, wire_action = self._history.resolve_action(action)
@@ -281,6 +305,7 @@ class FireEnv(gym.Env):
                 "action_masked": masked, "mask_reason": mask_reason,
                 "selected_slot": control["selected_slot"], "slot_switched": switched,
                 "track_generation": control.get("track_generation"),
+                "switch_reward_context": switch_context,
                 "shot_requested": control.get("shot_requested", False),
                 "shot_accepted": control.get("shot_accepted", False),
                 "reject_reason": control.get("reject_reason_name"),

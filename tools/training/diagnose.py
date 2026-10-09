@@ -14,6 +14,8 @@ import tempfile
 
 import gymnasium as gym
 import numpy as np
+
+from tools.config import load_tool_config, write_effective_config
 import torch
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.callbacks import BaseCallback
@@ -22,6 +24,7 @@ from stable_baselines3.common.logger import configure
 from src.training.config import ROOT
 from src.training.environment import make_environment, vectorize
 from src.training.models import load_model, read_checkpoint_metadata
+from src.training.paths import ensure_episode_directories, monitor_path
 from tools.training.view import _atomic_json
 
 
@@ -203,9 +206,10 @@ def probabilities(model, observations, masks):
 
 
 class CaptureRollout(BaseCallback):
-    def __init__(self, output, step_writer, event_file):
+    def __init__(self, output, step_writer, event_file, reward_scale=1.0):
         super().__init__()
         self.output, self.step_writer, self.event_file = output, step_writer, event_file
+        self.reward_scale = reward_scale
         self.rollout = 0
         self.all_steps, self.all_events, self.summaries = [], [], []
         self.requests, self.shots = {}, {}
@@ -230,6 +234,7 @@ class CaptureRollout(BaseCallback):
                "shot_requested": info["shot_requested"], "shot_accepted": info["shot_accepted"],
                "action_masked": info["action_masked"], "reject_reason": info["reject_reason"],
                "actual_shots": info["actual_shots"], "raw_reward": float(self.locals["rewards"][0]),
+               "switch_penalty": info.get("switch_penalty", 0.0),
                "terminated": capture["terminated"], "truncated": capture["truncated"],
                "end_reason": info["end_reason"], "active_projectiles": len(capture["projectiles"])}
         clock_before = info.get("decision_clock_before") or {}
@@ -326,8 +331,9 @@ class CaptureRollout(BaseCallback):
                                  "normalized_positive_fraction": float(np.mean([r["normalized_advantage"] > 0 for r in records])) if records else None,
                                  "surrogate_clipped_fraction": float(np.mean([r["surrogate_clipped"] for r in records])) if records else None}
         summary = {"rollout": self.rollout, "steps": len(self.rows),
+                   "reward_scale": self.reward_scale,
                    "reward": sum(r["raw_reward"] for r in self.rows), "nonzero_rewards": int(np.count_nonzero(b["raw_rewards"])),
-                   "reward_event_max_error": max(abs(r["event_damage"] - r["raw_reward"]) for r in self.rows),
+                   "reward_event_max_error": max(abs(float(np.float32(r["event_damage"] * self.reward_scale - r["switch_penalty"])) - r["raw_reward"]) for r in self.rows),
                    "gae_max_error": float(np.max(np.abs(self.reference - b["advantages"]))),
                    "gae_matches": bool(np.allclose(self.reference, b["advantages"], rtol=2e-5, atol=2e-4)),
                    "reward_removal_max_error": self.removal_error, "groups": normalized,
@@ -425,7 +431,8 @@ def diagnose(checkpoint, *, rollouts=3, device=None, output_dir=None):
     signal.signal(signal.SIGTERM, interrupt)
     try:
         with ExitStack() as stack:
-            env = EventCapture(make_environment(config, output / "environment", output / "episodes.monitor.csv"))
+            ensure_episode_directories(output)
+            env = EventCapture(make_environment(config, output / "environment", monitor_path(output, 1)))
             stack.callback(env.close)
             vec = vectorize(env)
             stack.callback(vec.close)
@@ -437,7 +444,7 @@ def diagnose(checkpoint, *, rollouts=3, device=None, output_dir=None):
             stack.callback(step_writer.close)
             stack.callback(batch_writer.close)
             events = stack.enter_context((output / "events.jsonl").open("w"))
-            callback = CaptureRollout(output, step_writer, events)
+            callback = CaptureRollout(output, step_writer, events, reward_scale=config.get("reward_scale", 1.0))
             state.update(status="running", actual_device=str(model.device))
             for number in range(1, rollouts + 1):
                 print(f"Sampling rollout {number}/{rollouts}: {config['ppo']['n_steps']} steps", flush=True)
@@ -484,13 +491,19 @@ def diagnose(checkpoint, *, rollouts=3, device=None, output_dir=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Trace the reward → GAE → PPO probability learning signal")
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--rollouts", type=int, default=3)
+    parser.add_argument("--config", type=Path, help="tool configuration JSON")
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--rollouts", type=int)
     parser.add_argument("--device")
     parser.add_argument("--output-dir", type=Path, help="parent directory for a unique diagnostic session")
     args = parser.parse_args()
+    overrides = {key: getattr(args, key) for key in ("checkpoint", "rollouts", "device", "output_dir")
+                 if getattr(args, key) is not None}
+    config = load_tool_config("diagnose", args.config, overrides)
     try:
-        output = diagnose(**vars(args))
+        output = diagnose(checkpoint=config["checkpoint"], rollouts=config["rollouts"],
+                          device=config["device"], output_dir=config["output_dir"])
+        write_effective_config(output / "tool_config.json", config)
         return 0 if json.loads((output / "run.json").read_text())["status"] == "complete" else 1
     except (ValueError, OSError, RuntimeError) as error:
         print(f"Diagnosis failed: {error}", flush=True)

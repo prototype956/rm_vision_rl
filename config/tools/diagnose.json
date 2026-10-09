@@ -1,0 +1,6 @@
+{
+  "checkpoint": "artifacts/training/joint-factorized-64env-20260927-151917/best.zip",
+  "rollouts": 3,
+  "device": "cpu",
+  "output_dir": "artifacts/diagnostics"
+}

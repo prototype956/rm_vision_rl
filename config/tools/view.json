@@ -1,0 +1,14 @@
+{
+  "mode": "checkpoint",
+  "checkpoint": "artifacts/training/joint-shared-score-64env-16updates-20260928-cont48-retry/checkpoint_4194304.zip",
+  "replay": null,
+  "device": "cpu",
+  "output_dir": "artifacts/evaluation",
+  "viewer_binary": null,
+  "label": null,
+  "open_view": true,
+  "scene_count": 8,
+  "scene_seeds": [],
+  "workers": 8,
+  "scene_seed": null
+}

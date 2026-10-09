@@ -49,7 +49,7 @@ def write_report(output, state, steps, events):
         "诊断不强制发射、不调参；短程结果只能验证链路及提示问题，不能单独确定长期训练根因。"]
     if summaries:
         checks.append(("奖励接入", "正常" if all(s["reward_event_max_error"] == 0 for s in summaries) else "异常",
-                       "逐步对比己方 damage_applied 事件与 Gym 原始奖励。"))
+                       "逐步将己方 damage_applied 事件乘以 reward_scale 并减去切板惩罚，再与训练奖励（自举前）比较。"))
         checks.append(("GAE 计算", "正常" if all(s["gae_matches"] for s in summaries) else "异常",
                        f"独立 float64 重算的最大绝对误差 {max(s['gae_max_error'] for s in summaries):.6g}；与 float32 缓冲区采用相对 2e-5、绝对 2e-4 容差。"))
         nonzero = sum(s["nonzero_rewards"] for s in summaries)
@@ -136,9 +136,9 @@ def write_report(output, state, steps, events):
         parts.append("</section>")
 
     x = [r["training_step"] for r in steps]
-    chart("原始奖励与时间截断补偿", "补偿来自价值预测，不能当作真实伤害。", [
+    chart("训练奖励、物理伤害与时间截断补偿", "伤害事件保持原单位；训练奖励已乘 reward_scale 并减去切板惩罚。补偿来自价值预测。", [
         (label, x, [r[key] for r in steps], "lines+markers") for label, key in
-        (("Gym 原始奖励", "raw_reward"), ("伤害事件", "event_damage"), ("截断补偿", "timeout_bootstrap"))], "奖励")
+        (("训练奖励（自举前）", "raw_reward"), ("伤害事件", "event_damage"), ("截断补偿", "timeout_bootstrap"))], "奖励")
     chart("价值预测、固定回报目标与优势", "每轮的回报目标保持为更新前计算值；曲线按回合拆开，避免跨回合连线。", [
         (f"回合 {ep} · {label}", [r["training_step"] for r in steps if r["episode"] == ep],
          [r[key] for r in steps if r["episode"] == ep], "lines")

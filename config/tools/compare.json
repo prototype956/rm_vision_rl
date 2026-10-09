@@ -1,0 +1,7 @@
+{
+  "checkpoint": "artifacts/training/joint-factorized-64env-20260927-151917/best.zip",
+  "baseline_checkpoint": "artifacts/training/joint-switch-64updates-20260926-1549/final.zip",
+  "output_dir": "artifacts/comparison",
+  "device": "cpu",
+  "workers": 4
+}

@@ -12,14 +12,31 @@ from pathlib import Path
 import shutil
 import tempfile
 from zipfile import ZipFile
+from time import perf_counter
 
 import torch
 from sb3_contrib import MaskablePPO
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import VecEnv
 
 from src.policy.observations import SCHEMA, JOINT_SCHEMA, VERSION
 from src.policy.decision_clock import CONTRACT as CLOCK_CONTRACT
-from src.training.config import ENV_PATHS, validate_config
+from src.training.config import validate_config
+from src.training.parallel import sampling_metadata
+
+
+class MeasuredMaskablePPO(MaskablePPO):
+    """保持 PPO 行为不变，分别记录采样（含自动 reset）和参数更新的墙钟时间。"""
+
+    def collect_rollouts(self, *args, **kwargs):
+        started = perf_counter()
+        result = super().collect_rollouts(*args, **kwargs)
+        self.logger.record("time/sampling_seconds", perf_counter() - started)
+        return result
+
+    def train(self):
+        started = perf_counter()
+        super().train()
+        self.logger.record("time/optimization_seconds", perf_counter() - started)
 
 
 def _digest(value):
@@ -45,37 +62,77 @@ def observation_contract(env):
         contract.update(version=2, schema_sha256=_digest(JOINT_SCHEMA), action_version=3,
                         actions=["hold"] + [f"{kind}_slot_{slot}" for slot in range(4)
                                              for kind in ("track", "request_fire")])
+    if "selection_memory" in env.observation_space.spaces:
+        contract.update(version=3, selection_memory={
+            "slots": [-1, 0, 1, 2, 3], "encoding": "one_hot",
+            "meaning": "previous_distinct_confirmed_slot",
+            "reset": "episode_generation_missing_callback_unreliable_or_invalid"})
     return contract
 
 
 def training_metadata(config, env):
     """在启动仿真前记录实际路径、配置指纹和观测契约。"""
     config = validate_config(config)
-    wrapped = env.envs[0] if isinstance(env, DummyVecEnv) else env
-    base = wrapped.unwrapped
-    for name in ENV_PATHS:
-        config["environment"][name] = str(getattr(base, name))
-    config["environment"]["episode_steps"] = base.episode_steps
-    config["environment"]["scene_seed"] = wrapped.get_wrapper_attr("scene_seed")
-    config["environment"]["scenario"] = base._scenario({"scenario": wrapped.get_wrapper_attr("scenario")})
-    if config["environment"].get("task") == "random_rotation_fire":
-        config["environment"]["angular_speed_range_rad_s"] = list(base.angular_speed_range_rad_s)
-    modules = base.vision_root / "src/config/modules"
+    settings = (env.env_method("training_settings", indices=0)[0] if isinstance(env, VecEnv)
+                else env.get_wrapper_attr("training_settings")())
+    config["environment"].update(settings)
+    modules = Path(settings["vision_root"]) / "src/config/modules"
     files = sorted(modules.rglob("*.yaml"))
     if not files:
         raise FileNotFoundError(f"no vision configuration in {modules}")
-    return {
+    result = {
         "format_version": 1,
         "config": config,
         "observation": observation_contract(env),
+        "sampling": sampling_metadata(config),
         "fingerprints": {
             "environment": _digest(config["environment"]),
-            "simulator_config": _file_digest(base.simulator_config),
+            "simulator_config": _file_digest(Path(settings["simulator_config"])),
             "vision_config": {str(path.relative_to(modules)): _file_digest(path) for path in files},
         },
         "dependencies": {name: version(name) for name in
                          ("torch", "stable-baselines3", "sb3-contrib", "gymnasium", "numpy", "tensorboard")},
     }
+
+    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp"):
+        result["policy_contract"] = copy.deepcopy(_policy_contract(config["policy_kind"]))
+    return result
+
+
+def _policy_contract(policy_kind):
+    """Return the architecture contract for custom actor policies."""
+    if policy_kind == "factorized_mlp":
+        from src.training.factorized_policy import CONTRACT
+        return CONTRACT
+    if policy_kind == "shared_score_mlp":
+        from src.training.shared_score_policy import CONTRACT
+        return CONTRACT
+    return None
+
+
+def _policy_class(policy_kind):
+    """Return the exact custom policy class, or None for the SB3 MLP policy."""
+    if policy_kind == "factorized_mlp":
+        from src.training.factorized_policy import FactorizedActorCriticPolicy
+        return FactorizedActorCriticPolicy
+    if policy_kind == "shared_score_mlp":
+        from src.training.shared_score_policy import SharedScoreActorCriticPolicy
+        return SharedScoreActorCriticPolicy
+    return None
+
+
+def _policy_matches(model_policy, policy_kind):
+    expected = _policy_class(policy_kind)
+    if expected is not None:
+        return type(model_policy) is expected
+    from sb3_contrib.common.maskable.policies import MaskableMultiInputActorCriticPolicy
+    return type(model_policy) is MaskableMultiInputActorCriticPolicy
+
+
+def _check_policy_contract(config, metadata):
+    expected = _policy_contract(config["policy_kind"])
+    if metadata.get("policy_contract") != expected:
+        raise ValueError("checkpoint policy contract differs; train a new model for a different policy kind")
 
 
 def build_model(config, env):
@@ -83,8 +140,12 @@ def build_model(config, env):
     params = copy.deepcopy(config["ppo"])
     architecture = params.pop("net_arch")
     torch.set_num_threads(config["torch_threads"])
-    return MaskablePPO(
-        "MultiInputPolicy", env, seed=config["seed"], device=config["device"],
+    policy = "MultiInputPolicy"
+    policy_class = _policy_class(config["policy_kind"])
+    if policy_class is not None:
+        policy = policy_class
+    return MeasuredMaskablePPO(
+        policy, env, seed=config["seed"], device=config["device"],
         policy_kwargs={"net_arch": architecture, "activation_fn": torch.nn.Tanh},
         **params,
     )
@@ -100,6 +161,7 @@ def read_checkpoint_metadata(path):
     if metadata.get("format_version") != 1:
         raise ValueError("unsupported checkpoint metadata version")
     validate_config(metadata["config"])
+    _check_policy_contract(metadata["config"], metadata)
     for name in ("num_timesteps", "completed_updates"):
         if type(metadata.get(name)) is not int or metadata[name] < 0:
             raise ValueError(f"checkpoint has invalid {name}")
@@ -118,7 +180,9 @@ def load_model(path, env, *, device=None):
     if current["fingerprints"] != metadata["fingerprints"]:
         raise ValueError("environment or vision configuration changed since the checkpoint; restore its configuration")
     torch.set_num_threads(config["torch_threads"])
-    model = MaskablePPO.load(path, env=env, device=config["device"], force_reset=True)
+    model = MeasuredMaskablePPO.load(path, env=env, device=config["device"], force_reset=True)
+    if not _policy_matches(model.policy, config["policy_kind"]):
+        raise ValueError("saved policy class disagrees with checkpoint policy_kind")
     if model.num_timesteps != metadata["num_timesteps"]:
         raise ValueError("checkpoint timestep metadata disagrees with saved model")
     return model, metadata
@@ -128,6 +192,9 @@ def save_checkpoint(model, metadata, path, completed_updates):
     """将权重、优化器和元数据保存到同一个 ZIP 文件，并原子替换目标文件。"""
     path = Path(path)
     data = copy.deepcopy(metadata)
+    _check_policy_contract(data["config"], data)
+    if not _policy_matches(model.policy, data["config"]["policy_kind"]):
+        raise ValueError("policy class and metadata policy_kind disagree")
     data.update(num_timesteps=int(model.num_timesteps), completed_updates=completed_updates)
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".checkpoint-", suffix=".zip", delete=False) as file:
         temporary = Path(file.name)

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "algorithm": "maskable_ppo",
-  "policy_kind": "mlp",
+  "policy_kind": "shared_score_mlp",
   "seed": 17,
   "device": "cpu",
   "torch_threads": 1,
@@ -26,10 +26,9 @@
       }
     },
     "task": "random_rotation_fire",
-    "angular_speed_range_rad_s": [
-      1,
-      7
-    ]
+    "angular_speed_range_rad_s": [1, 7],
+    "action_mode": "joint",
+    "selection_memory": true
   },
   "ppo": {
     "n_steps": 1024,
@@ -43,14 +42,17 @@
     "vf_coef": 0.5,
     "max_grad_norm": 0.5,
     "net_arch": {
-      "pi": [
-        128,
-        128
-      ],
-      "vf": [
-        128,
-        128
-      ]
+      "pi": [128, 128],
+      "vf": [128, 128]
     }
+  },
+  "reward_scale": 0.05,
+  "n_envs": 16,
+  "selection_reward": {
+    "switch_cost": 0.002,
+    "return_cost": 0.03,
+    "return_window_s": 0.1,
+    "facing_rate_per_s": 0.1,
+    "facing_margin": 0.1
   }
 }
