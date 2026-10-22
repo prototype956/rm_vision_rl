@@ -48,7 +48,8 @@ class EvaluationSession:
         self.end_reason = None
         self.selection = dict(selected_slot=-1, slot_switched=False, slot_switches=0)
         scene = dict(scenario or {})
-        scene.setdefault("target_hp", self.config.target_hp)
+        if "duel" not in scene:
+            scene.setdefault("target_hp", self.config.target_hp)
         if isinstance(self.policy, TensorPolicy):
             self.policy.reset()
         self.warmup.reset(seed, scene)

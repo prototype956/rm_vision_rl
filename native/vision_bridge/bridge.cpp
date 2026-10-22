@@ -1,18 +1,19 @@
-#include <algorithm>
-#include <cmath>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <nlohmann/json.hpp>
-#include <numbers>
-
 #include "core/logger.hpp"
 #include "modules/armor_pnp/armor_pnp.hpp"
 #include "modules/armor_predictor/armor_predictor.hpp"
 #include "modules/fire_control/control_session.hpp"
 #include "modules/fire_control/fire_only_policy_adapter.hpp"
 #include "policy_wire.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <memory>
+
+#include <nlohmann/json.hpp>
+#include <numbers>
 
 using Json = nlohmann::json;
 namespace {
@@ -24,7 +25,8 @@ auto Time(std::uint64_t ns) {
   return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
 }
 void Require(bool valid, const char* message) {
-  if (!valid) throw std::runtime_error(message);
+  if (!valid)
+    throw std::runtime_error(message);
 }
 void Keys(const Json& value, std::initializer_list<std::string_view> allowed) {
   Require(value.is_object(), "object required");
@@ -106,6 +108,9 @@ class Bridge {
       pending_.reset();
       last_tick_.reset();
       last_frame_.reset();
+      seen_generation_.reset();
+      seen_at_ = {};
+      detected_ = {};
       search_start_.reset();
       evaluation_window_.reset();
       training_ = false;
@@ -172,6 +177,7 @@ class Bridge {
             "control requires consecutive 10 ms ticks");
     const auto step_start = std::chrono::steady_clock::now();
     Json frame_results = Json::array();
+    detected_.fill(false);
     for (const auto& f : request.at("visual_frames")) {
       Keys(f, {"round_id", "sequence", "capture_time_ns", "capture_timestamp_ns",
                "delivery_time_ns", "camera", "kinematics", "feedback", "detections"});
@@ -227,6 +233,18 @@ class Bridge {
       const auto pnp = pnp_->ProcessFrame(sequence, camera, detections, refinements);
       auto prediction =
           predictor_->ProcessFrame(stamp, spatial, detections, refinements, pnp.output, {});
+      if (!seen_generation_ || *seen_generation_ != prediction.output.track_generation) {
+        seen_at_ = {};
+        detected_.fill(false);
+        seen_generation_ = prediction.output.track_generation;
+      }
+      // Only accepted image associations count as detections, never projected armor truth.
+      for (const auto& association : prediction.diagnostics.associations) {
+        if (association.accepted && association.slot >= 0 && association.slot < 4) {
+          seen_at_[association.slot] = capture;
+          detected_[association.slot] = true;
+        }
+      }
       input_.prediction = std::move(prediction.output);
       Json poses = Json::array();
       const auto world_camera =
@@ -275,7 +293,7 @@ class Bridge {
               modules::FireOnlyPolicyAdapter::RestrictMask(observation, choice);
             }
             const auto token = ++policy_token_;
-            policy_record = {{"observation", rmvision_rl::Observation(observation)},
+            policy_record = {{"observation", WireObservation(observation, now)},
                              {"metadata",
                               {{"track_generation", snapshot.prediction.track_generation},
                                {"source_sequence", snapshot.prediction.sequence}}}};
@@ -421,9 +439,21 @@ class Bridge {
   }
 
  private:
+  Json WireObservation(const modules::PolicyObservation& observation, std::uint64_t now) const {
+    auto wire = rmvision_rl::Observation(observation);
+    for (std::size_t slot = 0; slot < 4; ++slot) {
+      wire["candidates"][slot]["detected"] = detected_[slot];
+      wire["candidates"][slot]["last_seen_age_s"] =
+          seen_at_[slot] ? Json(static_cast<double>(now - *seen_at_[slot]) * 1e-9) : Json(nullptr);
+    }
+    return wire;
+  }
   YAML::Node Load(const std::string& name) const {
     return YAML::LoadFile(root_ + "/" + name + ".yaml");
   }
+  std::array<std::optional<std::uint64_t>, 4> seen_at_{};
+  std::array<bool, 4> detected_{};
+  std::optional<std::uint64_t> seen_generation_;
   std::string root_;
   std::ostream* diagnostics_{nullptr};  ///< 可选离线诊断输出，不作为控制器输入。
   std::uint64_t round_{0}, processed_{0};
@@ -458,7 +488,8 @@ int main(int argc, char** argv) {
     Bridge bridge(argv[1], argc == 4 ? &diagnostics : nullptr);
     std::string line;
     while (std::getline(std::cin, line)) {
-      if (line.size() > 1024 * 1024) throw std::runtime_error("bridge input too large");
+      if (line.size() > 1024 * 1024)
+        throw std::runtime_error("bridge input too large");
       try {
         std::cout << bridge.Handle(Json::parse(line)).dump() << std::endl;
       } catch (const PolicyCancelled&) {

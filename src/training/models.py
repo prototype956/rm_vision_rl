@@ -67,6 +67,10 @@ def observation_contract(env):
             "slots": [-1, 0, 1, 2, 3], "encoding": "one_hot",
             "meaning": "previous_distinct_confirmed_slot",
             "reset": "episode_generation_missing_callback_unreliable_or_invalid"})
+    if "privileged" in env.observation_space.spaces:
+        from src.policy.asymmetric_observations import SCHEMA as actor_schema
+        from src.policy.privileged import CONTRACT as critic_schema
+        contract.update(version=4, schema_sha256=_digest(actor_schema), critic=critic_schema)
     return contract
 
 
@@ -94,7 +98,7 @@ def training_metadata(config, env):
                          ("torch", "stable-baselines3", "sb3-contrib", "gymnasium", "numpy", "tensorboard")},
     }
 
-    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp"):
+    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp", "asymmetric_mlp"):
         result["policy_contract"] = copy.deepcopy(_policy_contract(config["policy_kind"]))
     return result
 
@@ -107,6 +111,9 @@ def _policy_contract(policy_kind):
     if policy_kind == "shared_score_mlp":
         from src.training.shared_score_policy import CONTRACT
         return CONTRACT
+    if policy_kind == "asymmetric_mlp":
+        from src.training.asymmetric_policy import CONTRACT
+        return CONTRACT
     return None
 
 
@@ -118,6 +125,9 @@ def _policy_class(policy_kind):
     if policy_kind == "shared_score_mlp":
         from src.training.shared_score_policy import SharedScoreActorCriticPolicy
         return SharedScoreActorCriticPolicy
+    if policy_kind == "asymmetric_mlp":
+        from src.training.asymmetric_policy import AsymmetricActorCriticPolicy
+        return AsymmetricActorCriticPolicy
     return None
 
 

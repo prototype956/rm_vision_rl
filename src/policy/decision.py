@@ -44,6 +44,8 @@ class DecisionPolicy(TensorPolicy):
         changed = self.generation is not None and generation != self.generation
         super().set_generation(generation)
         self.generation_changed = changed
+        if changed:
+            self.return_slot = self._last_selected = -1
 
     def observation(self):
         result = dict(features=np.array(self.rows, dtype=np.float32),
@@ -106,11 +108,17 @@ class JointFirePolicy(DecisionPolicy):
     """四槽位直接选择与单发请求；不调用规则选板器。"""
 
 
-def make_policy(action_mode='fire_only', actor=None, *, decision_clock=None, selection_memory=False):
+def make_policy(action_mode='fire_only', actor=None, *, decision_clock=None, selection_memory=False,
+                observation_mode="legacy"):
+    if observation_mode not in ("legacy", "asymmetric_v1"):
+        raise ValueError("unsupported observation mode")
+    if observation_mode == "asymmetric_v1" and action_mode != "joint":
+        raise ValueError("asymmetric observations require joint actions")
     if type(selection_memory) is not bool or (selection_memory and action_mode != 'joint'):
         raise ValueError('selection_memory requires joint mode and a boolean value')
     if action_mode == 'joint':
-        return JointFirePolicy(actor, decision_clock=decision_clock, selection_memory=selection_memory)
+        return JointFirePolicy(actor, decision_clock=decision_clock, selection_memory=selection_memory,
+                               version=4 if observation_mode == "asymmetric_v1" else 2)
     if action_mode == 'fire_only':
         from src.policy.static_fire import StaticFirePolicy
         return StaticFirePolicy(actor, decision_clock=decision_clock)

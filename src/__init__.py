@@ -9,3 +9,6 @@ else:
              entry_point="src.environment.static_fire:StaticFireEnv")
     register(id="RMRotationFire-v0",
              entry_point="src.environment.rotation_fire:RotationFireEnv")
+
+    register(id="RMMultiRobotFire-v0",
+             entry_point="src.environment.multi_robot_fire:MultiRobotFireEnv")

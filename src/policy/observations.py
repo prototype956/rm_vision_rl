@@ -29,6 +29,9 @@ def encode(observation, *, version=VERSION):
     Raises:
         ValueError: 特征非有限、字段长度或顺序不符合 schema，或动作掩码格式错误。
     """
+    if version == 4:
+        from src.policy.asymmetric_observations import encode as restricted_encode
+        return restricted_encode(observation)
     if version not in (1, 2):
         raise ValueError("unsupported feature schema")
     schema = SCHEMA if version == 1 else JOINT_SCHEMA
@@ -117,6 +120,9 @@ class TensorPolicy:
     def __init__(self, actor, *, version=VERSION):
         self.actor=actor
         self.schema = SCHEMA if version == 1 else JOINT_SCHEMA
+        if version == 4:
+            from src.policy.asymmetric_observations import SCHEMA as restricted_schema
+            self.schema = restricted_schema
         self.version = version
         self.feature_count=len(self.schema['features'])
         self.names=None
@@ -132,6 +138,13 @@ class TensorPolicy:
     def set_generation(self, generation):
         """目标代次变化时清空历史；代次仅用于复位，不作为 actor 的输入特征。"""
         if self.generation is not None and generation != self.generation:
+            if self.version == 4:
+                from src.policy.asymmetric_observations import TARGET_FEATURES
+                for row in self.rows:
+                    for index in TARGET_FEATURES:
+                        row[index] = 0.0
+                self.generation = generation
+                return
             pending = self.pending
             self.reset()
             if pending:

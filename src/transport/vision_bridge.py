@@ -40,8 +40,9 @@ def control_referee(data, now_ns):
 
 class VisionBridge:
     """管理 C++ 桥接的同步 JSONL 请求及当前待提交周期。"""
-    def __init__(self, process):
+    def __init__(self, process, observation_mode="legacy"):
         self.process = process
+        self.observation_mode = observation_mode
         self._prepared = None
 
     def exchange(self, value):
@@ -81,10 +82,26 @@ class VisionBridge:
             raise RuntimeError("submit/ack or cancel the prepared cycle first")
         # 仅转发明确列出的控制字段，评估真值、事件、奖励、场景和种子不进入 C++。
         data = response["data"]
+        frames = copy.deepcopy(data["visual_frames"])
+        referee = control_referee(data, response["sim_time_ns"]) if self.observation_mode == "legacy" else None
+        if self.observation_mode == "asymmetric_v1":
+            thermal = data["actor_feedback"]["thermal"]
+            # Only sampled, own thermal/allowance information gates firing. No HP,
+            # defense, feeder, exact allowance or hidden mechanism flags reach control.
+            permitted = thermal["heat"] <= thermal["heat_limit"] and thermal["allowance_remaining"] != 0
+            referee = dict(valid=thermal["valid"], sample_ns=thermal["sample_ns"],
+                sequence=thermal["sequence"], hp=1, heat=thermal["heat"], heat_limit=thermal["heat_limit"],
+                cooling_per_second=thermal["effective_cooling_per_second"],
+                allowance_mode=int(thermal["allowance_remaining"] >= 0),
+                allowance_remaining=max(0,thermal["allowance_remaining"]),
+                fire_permitted=permitted, fire_blocks=0)
+            for frame in frames:
+                # Before PnP/EKF: IMU direction is available; exact chassis translation is not.
+                frame["kinematics"]["world_t_gimbal"]["translation"] = [0.0, 0.0, 0.0]
         result = self.exchange(dict(op="step_policy" if external else "step",
                                     round_id=response["round_id"], sim_time_ns=response["sim_time_ns"],
-                                    visual_frames=data["visual_frames"], feedback=data["feedback"],
-                                    self_referee=control_referee(data, response["sim_time_ns"])))
+                                    visual_frames=frames, feedback=data["feedback"],
+                                    self_referee=referee))
         self._prepared = result
         return copy.deepcopy(result)
 
@@ -160,7 +177,7 @@ class VisionBridge:
 
 
 @contextmanager
-def vision_worker(binary, vision_root, output, *, diagnostics=None):
+def vision_worker(binary, vision_root, output, *, diagnostics=None, observation_mode="legacy"):
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     config = output / "logger.json"
@@ -173,7 +190,7 @@ def vision_worker(binary, vision_root, output, *, diagnostics=None):
                                    cwd=output, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
                                    text=True, bufsize=1)
         try:
-            bridge = VisionBridge(process)
+            bridge = VisionBridge(process, observation_mode)
             yield bridge
             bridge.cancel()
             process.stdin.close()

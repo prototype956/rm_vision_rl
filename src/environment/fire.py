@@ -18,6 +18,14 @@ from src.transport.processes import training_worker
 from src.transport.vision_bridge import vision_worker
 
 
+def simulator_root_path(value=None):
+    if value is not None:
+        return Path(value).resolve()
+    workspace = Path(__file__).resolve().parents[3]
+    candidates = (workspace / "rm_simulator_2027", workspace / "bevy_robomaster_simulator")
+    return next((p for p in candidates if p.is_dir()), candidates[0]).resolve()
+
+
 class FireEnv(gym.Env):
     """管理一对仿真与桥接进程，每次 step 推进 10 ms，回合结束后需显式重置。
 
@@ -32,14 +40,14 @@ class FireEnv(gym.Env):
     def __init__(self, *, simulator_root=None, vision_root=None, simulator_binary=None,
                  bridge_binary=None, simulator_config=None, log_dir=None,
                  episode_steps=3000, warmup_config=None, render_mode=None, decision_clock=None,
-                 action_mode="fire_only", selection_memory=False):
+                 action_mode="fire_only", selection_memory=False, observation_mode="legacy"):
         super().__init__()
         if render_mode is not None:
             raise ValueError("FireEnv only supports render_mode=None")
         if type(episode_steps) is not int or episode_steps < 1:
             raise ValueError("episode_steps must be a positive integer")
         root = Path(__file__).resolve().parents[2]
-        self.simulator_root = Path(simulator_root or root.parent / "rm_simulator_2027").resolve()
+        self.simulator_root = simulator_root_path(simulator_root)
         self.vision_root = Path(vision_root or root.parent / "rm_vision_2027").resolve()
         self.simulator_binary = Path(
             simulator_binary or self.simulator_root / "target/release/daedalus_training").resolve()
@@ -52,14 +60,19 @@ class FireEnv(gym.Env):
         self.warmup_config = warmup_config or WarmupConfig()
         self.render_mode = None
         self.action_mode = action_mode
+        self.observation_mode = observation_mode
+        self._last_request_ns = None
         self._history = make_policy(action_mode, decision_clock=decision_clock,
-                                    selection_memory=selection_memory)
+                                    selection_memory=selection_memory, observation_mode=observation_mode)
         self.action_space = spaces.Discrete(self._history.action_count)
         self.observation_space = spaces.Dict({
             "features": spaces.Box(-1.0, 1.0, (HISTORY, self._history.feature_count), np.float32),
             "valid": spaces.MultiBinary(HISTORY),
             "action_mask": spaces.MultiBinary(int(self.action_space.n)),
         })
+        if observation_mode == "asymmetric_v1":
+            from src.policy.privileged import FEATURE_COUNT
+            self.observation_space.spaces["privileged"] = spaces.Box(-1.,1.,(FEATURE_COUNT,),np.float32)
         if selection_memory:
             self.observation_space.spaces["selection_memory"] = spaces.MultiBinary(5)
         if self._history.clock.enabled:
@@ -90,7 +103,8 @@ class FireEnv(gym.Env):
             self.simulator_root, self.simulator_binary, self._output / "simulator.log",
             self.simulator_config))
         self._bridge = self._stack.enter_context(vision_worker(
-            self.bridge_binary, self.vision_root, self._output / "bridge"))
+            self.bridge_binary, self.vision_root, self._output / "bridge",
+            observation_mode=self.observation_mode))
 
     def _fail(self):
         """携带原异常退出工作进程上下文，保留原错误供调用方处理。"""
@@ -152,6 +166,7 @@ class FireEnv(gym.Env):
                               "reject_reason": None, "executed_action": None, "wire_action": None,
                               "selected_slot": -1, "slot_switched": False, "mask_reason": None}
         self._history.reset()
+        self._last_request_ns = None
         self._reset_attempts = []
         try:
             self._start()
@@ -190,12 +205,27 @@ class FireEnv(gym.Env):
         self._history.begin_step()
         if self._prepared.get("kind") == "policy_observation":
             self._history.set_generation(self._prepared["metadata"]["track_generation"])
-            self._history(self._prepared["observation"])
+            if self.observation_mode == "legacy":
+                self._history(self._prepared["observation"])
         else:
             # 跳过策略回调的周期仍占用一行历史，并推进一个物理步。
             if self._prepared["command"]["fire"]:
                 raise RuntimeError("a skipped policy callback must not issue fire")
+        if self.observation_mode == "asymmetric_v1":
+            from src.policy.asymmetric_observations import adapt_observation
+            raw = self._prepared.get("observation")
+            self._actor_semantic = adapt_observation(raw, self._response["data"]["actor_feedback"],
+                self._response["sim_time_ns"], last_request_ns=self._last_request_ns,
+                request_previous=self._last_request["shot_requested"])
+            self._history(self._actor_semantic)
+        if self.observation_mode == "legacy" and self._ammo_exhausted():
+            self._history.mask[list(self._history.fire_actions)] = False
+            self._history.physical_fire_action = None
         self._obs = self._history.observation()
+        if self.observation_mode == "asymmetric_v1":
+            from src.policy.privileged import encode
+            self._obs["privileged"] = encode(self._response["data"]["privileged_state"],
+                                              self._response["sim_time_ns"])
 
     def _observation(self):
         return {key: value.copy() for key, value in self._obs.items()}
@@ -220,6 +250,12 @@ class FireEnv(gym.Env):
                 "events": data["events"],
             },
         })
+
+    def _ammo_exhausted(self):
+        if not getattr(self, "finite_episode", False) or self._response is None:
+            return False
+        allowance = self._robots()[1]["resources"]["allowance"]
+        return allowance["mode"] == "limited" and allowance["remaining"] == 0
 
     def _robots(self):
         return {r["robot_id"]: r for r in self._response["data"]["evaluation"]["robots"]}
@@ -310,6 +346,11 @@ class FireEnv(gym.Env):
                 "shot_accepted": control.get("shot_accepted", False),
                 "reject_reason": control.get("reject_reason_name"),
             }
+            if self._last_request["shot_requested"]:
+                self._last_request_ns = before
+            # Admission to the controller is distinct from physical execution in the simulator.
+            self._last_request["simulator_actual_shots"] = self._robots()[1]["actual_shots"]
+            self._last_request["simulator_rejected_requests"] = self._robots()[1]["rejected_requests"]
             if clock_before is not None:
                 self._last_request.update(
                     decision_clock_before=clock_before, physical_fire_legal_before=physical_fire_legal,
@@ -333,6 +374,12 @@ class FireEnv(gym.Env):
             robots = self._robots()
             reason = ("controlled_dead" if robots[1]["hp"] <= 0 else
                       "target_destroyed" if robots[2]["hp"] <= 0 else None)
+            if reason is None and self._ammo_exhausted():
+                # Continue ordinary 10ms transitions so final projectiles retain their
+                # physical damage/reward. No post-hoc reward or hidden time jump.
+                pending = robots[1]["resources"]["pending_feed"]
+                if pending is None and not self._response["data"]["evaluation"]["projectiles"]:
+                    reason = "ammo_exhausted"
             terminated = reason is not None
             truncated = not terminated and self._steps >= self.episode_steps
             if truncated:

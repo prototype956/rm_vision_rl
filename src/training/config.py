@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from src.policy.decision_clock import validate_clock
 from src.environment.rotation_fire import rotation_scenario, validate_speed_range
+from src.environment.multi_robot_fire import multi_robot_scenario
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "config/training/rotation_joint_shared_score_ppo.json"
@@ -25,7 +26,7 @@ def validate_config(value):
     if type(scale) not in (int, float) or not math.isfinite(scale) or scale <= 0:
         raise ValueError("reward_scale must be finite and positive")
     if (config["version"] != 1 or config["algorithm"] != "maskable_ppo"
-            or config["policy_kind"] not in ("mlp", "factorized_mlp", "shared_score_mlp")):
+            or config["policy_kind"] not in ("mlp", "factorized_mlp", "shared_score_mlp", "asymmetric_mlp")):
         raise ValueError("only version 1 maskable_ppo with mlp/factorized_mlp/shared_score_mlp is implemented")
 
     def integer(name, number, minimum=1):
@@ -42,7 +43,7 @@ def validate_config(value):
     env = config["environment"]
     if (not isinstance(env, dict) or not {"episode_steps", "scene_seed", "scenario"} <= env.keys()
             or set(env) - {"episode_steps", "scene_seed", "scenario", "decision_clock", "task",
-                           "angular_speed_range_rad_s", "action_mode", "selection_memory", *ENV_PATHS}):
+                           "angular_speed_range_rad_s", "action_mode", "selection_memory", "observation_mode", *ENV_PATHS}):
         raise ValueError("invalid environment config keys")
     integer("episode_steps", env["episode_steps"])
     integer("scene_seed", env["scene_seed"], 0)
@@ -50,8 +51,13 @@ def validate_config(value):
         raise ValueError("environment.scenario must be an object")
     if env.get("action_mode", "fire_only") not in ("fire_only", "joint"):
         raise ValueError("environment.action_mode must be fire_only or joint")
-    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp") and env.get("action_mode") != "joint":
+    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp", "asymmetric_mlp") and env.get("action_mode") != "joint":
         raise ValueError(f"{config['policy_kind']} requires joint action mode")
+    mode = env.get("observation_mode", "legacy")
+    if mode not in ("legacy", "asymmetric_v1"):
+        raise ValueError("unsupported observation_mode")
+    if (mode == "asymmetric_v1") != (config["policy_kind"] == "asymmetric_mlp"):
+        raise ValueError("asymmetric_v1 observations require asymmetric_mlp policy, and vice versa")
     if "selection_memory" in env and type(env["selection_memory"]) is not bool:
         raise ValueError("selection_memory must be boolean")
     if env.get("selection_memory", False) and env.get("action_mode") != "joint":
@@ -80,14 +86,16 @@ def validate_config(value):
         if env.get("action_mode", "fire_only") != "joint":
             raise ValueError("switch_penalty requires joint action mode")
     task = env.get("task", "static_fire")
-    if task not in ("static_fire", "random_rotation_fire"):
-        raise ValueError("environment.task must be static_fire or random_rotation_fire")
+    if task not in ("static_fire", "random_rotation_fire", "multi_robot_fire"):
+        raise ValueError("environment.task must be static_fire, random_rotation_fire or multi_robot_fire")
     if task == "random_rotation_fire":
         env["angular_speed_range_rad_s"] = validate_speed_range(
             env.get("angular_speed_range_rad_s", [1, 7]))
         rotation_scenario({"scenario": env["scenario"]})
     elif "angular_speed_range_rad_s" in env:
         raise ValueError("angular_speed_range_rad_s requires random_rotation_fire")
+    if task == "multi_robot_fire":
+        multi_robot_scenario({"scenario":env["scenario"]})
     if "decision_clock" in env:
         if env["decision_clock"] is None:
             raise ValueError("omit decision_clock to disable it")

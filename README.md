@@ -1,5 +1,7 @@
 # RM Vision RL
 
+Actor/Critic v4 观测契约、Actor 导出和 NUC/服务器分离训练见 [asymmetric_observations.md](docs/asymmetric_observations.md)。
+
 用于 RoboMaster 火控强化学习的环境适配项目。策略负责当前跟踪目标的装甲板选择和开火时机，继续复用视觉项目的 PnP、目标预测、弹道解算和 TinyMPC。
 
 **当前提供随机原地旋转靶 `RMRotationFire-v0`、静止靶 `RMStaticFire-v0`、MaskablePPO/MLP 训练入口，以及规则和 Python 回调评估闭环。** Gym 支持规则选板的两动作模式和 RL 联合选板/开火的九动作模式，每步推进 10 ms，基础环境默认预热后采样 30 秒。PPO 训练默认使用联合九动作策略和每回合随机出生的原地旋转靶（2–8 米，双向 1–7 rad/s 匀速）、5 秒（500 步）回合，支持检查点恢复、CSV 和 TensorBoard 日志。GRU、模型导出和实机推理属于后续工作。
@@ -99,3 +101,7 @@ artifacts/venv/bin/python -m tools.training.compare \
 当前策略 `shared_score_mlp` 对四个候选使用同一评分器，选板特征不再按固定槽位分别输出；
 它使用联合模式的九动作协议，必须从头训练，不能恢复其他策略类型的检查点。
 详见 [策略接口](docs/interfaces.md#shared_score_mlp-策略契约)。
+
+## 联盟赛多车型训练环境
+
+启动、车型参数与验收状态见 [联盟赛多车型训练环境](docs/multirobot_environment.md)。

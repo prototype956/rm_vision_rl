@@ -10,6 +10,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.environment.static_fire import StaticFireEnv
 from src.environment.rotation_fire import RotationFireEnv
+from src.environment.multi_robot_fire import MultiRobotFireEnv
 from src.training.config import ENV_PATHS
 from src.training.paths import reward_log_path
 from src.training.selection_reward import selection_costs
@@ -165,6 +166,7 @@ def make_environment(config, log_dir, monitor_file=None):
     """创建尚未启动的任务环境，每个实例独占一对仿真与视觉桥接进程。"""
     settings = config["environment"]
     kwargs = {key: settings[key] for key in ENV_PATHS if key in settings}
+    kwargs["observation_mode"] = settings.get("observation_mode", "legacy")
     kwargs["action_mode"] = settings.get("action_mode", "fire_only")
     kwargs["selection_memory"] = settings.get("selection_memory", False)
     if "decision_clock" in settings:
@@ -172,8 +174,9 @@ def make_environment(config, log_dir, monitor_file=None):
     rotation = settings.get("task", "static_fire") == "random_rotation_fire"
     if rotation:
         kwargs["angular_speed_range_rad_s"] = settings.get("angular_speed_range_rad_s", [1, 7])
-    base_class = RotationFireEnv if rotation else StaticFireEnv
-    wrapper = RandomScenario if rotation else FixedScenario
+    multi = settings.get("task") == "multi_robot_fire"
+    base_class = MultiRobotFireEnv if multi else RotationFireEnv if rotation else StaticFireEnv
+    wrapper = RandomScenario if rotation or multi else FixedScenario
     base = base_class(episode_steps=settings["episode_steps"], log_dir=log_dir, **kwargs)
     env = wrapper(base, settings["scene_seed"], settings["scenario"])
     reward_log = str(reward_log_path(monitor_file)) if monitor_file else None
