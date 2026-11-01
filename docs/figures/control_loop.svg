@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820" role="img" aria-labelledby="title desc">
+<title id="title">闭环数据流与训练信息边界</title><desc id="desc">实线：控制周期与观测；虚线：仅训练 / 独立评估通道。每次 Advance 推进 10 ms。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#61758a"/></marker></defs>
+<style>text{font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;fill:#25394c} .edge{fill:none;stroke:#61758a;stroke-width:2;marker-end:url(#arrow)} .label{font-size:16px;paint-order:stroke;stroke:white;stroke-width:7;stroke-linejoin:round}</style>
+<rect width="1200" height="820" fill="white"/>
+<text x="35" y="40" font-size="25" text-anchor="start" font-weight="600">闭环数据流与训练信息边界</text>
+<text x="35" y="72" font-size="16" text-anchor="start">实线：控制周期与观测；虚线：仅训练 / 独立评估通道。每次 Advance 推进 10 ms。</text>
+<path class="edge" d="M340,200 L450,200"/>
+<text class="label" x="395" y="180" text-anchor="middle">角点 / 反馈</text>
+<path class="edge" d="M600,250 L600,350"/>
+<text class="label" x="665" y="305" text-anchor="middle">估计与候选</text>
+<path class="edge" d="M750,400 L860,400"/>
+<text class="label" x="805" y="380" text-anchor="middle">Actor 输入</text>
+<path class="edge" d="M1010,350 L1010,250"/>
+<text class="label" x="1060" y="305" text-anchor="middle">九动作</text>
+<path class="edge" d="M1010,150 L1010,110 L190,110 L190,150"/>
+<text class="label" x="600" y="101" text-anchor="middle">Python 提交 Advance，推进后 ack</text>
+<path class="edge" d="M190,250 L190,590" stroke-dasharray="6 5"/>
+<text class="label" x="250" y="500" text-anchor="middle">事件 / 结果</text>
+<path class="edge" d="M340,230 L385,230 L385,642 L450,642" stroke-dasharray="6 5"/>
+<text class="label" x="390" y="560" text-anchor="middle">仅训练真值</text>
+<path class="edge" d="M600,450 L600,590" stroke-dasharray="6 5"/>
+<text class="label" x="665" y="525" text-anchor="middle">合法观测</text>
+<path class="edge" d="M750,642 L860,642" stroke-dasharray="6 5"/>
+<text class="label" x="805" y="622" text-anchor="middle">价值</text>
+<path class="edge" d="M1125,450 L1125,590" stroke-dasharray="6 5"/>
+<text class="label" x="1080" y="525" text-anchor="middle">轨迹 / 行为概率</text>
+<path class="edge" d="M190,695 L190,738 L1010,738 L1010,695" stroke-dasharray="6 5"/>
+<text class="label" x="600" y="730" text-anchor="middle">训练：逐步奖励；评估尾部伤害不追加到 PPO</text>
+<rect x="40" y="150" width="300" height="100" rx="10" fill="#eef5ff" stroke="#4475ad" stroke-width="1.5"/>
+<text x="190.0" y="193.0" font-size="18" text-anchor="middle" font-weight="600">Rust 同步仿真</text>
+<text x="190.0" y="219.0" font-size="16" text-anchor="middle">物理 / 测量 / 自身反馈</text>
+<rect x="450" y="150" width="300" height="100" rx="10" fill="#eef5ff" stroke="#4475ad" stroke-width="1.5"/>
+<text x="600.0" y="193.0" font-size="18" text-anchor="middle" font-weight="600">C++ 视觉估计</text>
+<text x="600.0" y="219.0" font-size="16" text-anchor="middle">PnP → ArmorPredictor</text>
+<rect x="860" y="150" width="300" height="100" rx="10" fill="#eef5ff" stroke="#4475ad" stroke-width="1.5"/>
+<text x="1010.0" y="193.0" font-size="18" text-anchor="middle" font-weight="600">C++ 火控与执行</text>
+<text x="1010.0" y="219.0" font-size="16" text-anchor="middle">弹道 → TinyMPC → 命令</text>
+<rect x="450" y="350" width="300" height="100" rx="10" fill="#eef5ff" stroke="#4475ad" stroke-width="1.5"/>
+<text x="600.0" y="393.0" font-size="18" text-anchor="middle" font-weight="600">Python 观测适配</text>
+<text x="600.0" y="419.0" font-size="16" text-anchor="middle">v5 白名单 / 掩码 / 时钟</text>
+<rect x="860" y="350" width="300" height="100" rx="10" fill="#eef5ff" stroke="#4475ad" stroke-width="1.5"/>
+<text x="1010.0" y="393.0" font-size="18" text-anchor="middle" font-weight="600">GRU Actor</text>
+<text x="1010.0" y="419.0" font-size="16" text-anchor="middle">本地记忆 → 选板 / 请求开火</text>
+<rect x="40" y="590" width="300" height="105" rx="10" fill="#f0ecfa" stroke="#8465ac" stroke-width="1.5"/>
+<text x="190.0" y="635.5" font-size="18" text-anchor="middle" font-weight="600">独立评估与奖励统计</text>
+<text x="190.0" y="661.5" font-size="16" text-anchor="middle">事件 / 实际出膛 / 伤害</text>
+<rect x="450" y="590" width="300" height="105" rx="10" fill="#f0ecfa" stroke="#8465ac" stroke-width="1.5"/>
+<text x="600.0" y="635.5" font-size="18" text-anchor="middle" font-weight="600">独立 GRU Critic</text>
+<text x="600.0" y="661.5" font-size="16" text-anchor="middle">合法观测 + 当前 privileged</text>
+<rect x="860" y="590" width="300" height="105" rx="10" fill="#f0ecfa" stroke="#8465ac" stroke-width="1.5"/>
+<text x="1010.0" y="635.5" font-size="18" text-anchor="middle" font-weight="600">完整回合循环 PPO</text>
+<text x="1010.0" y="661.5" font-size="16" text-anchor="middle">分别优化 Actor 与 Critic</text>
+<text x="35" y="785" font-size="16" text-anchor="start">Actor 只读取白名单；真值、实际伤害与事件账本不作为 Actor 输入。NUC 仅部署 Actor 与本地状态。</text>
+</svg>

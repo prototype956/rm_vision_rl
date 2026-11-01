@@ -1,0 +1,24 @@
+flowchart TB
+  pre["preflight：全路径可见性与物理准入<br/>冻结场景和证书，绑定原生二进制 / 配置身份"]:::check
+  cal["calibrate：传统火控校准 → 冻结门槛 → 独立验证<br/>T1/T2：每车型 × 运动组合分别检查；测试集不调参"]:::check
+  migration["显式迁移 v2 → v3，并隔离复评旧已解锁阶段<br/>recurrent.pt 字节不变，清旧晋级历史，定位未通过阶段"]:::check
+  qual["benchmark：两角色各完成两次新增更新<br/>检查恢复、Actor 导出及配置 / 场景 / 校准身份"]:::check
+  gate["run 发布核查：资格验证 + 原始 / 修复碰撞回归<br/>核对检查点、场景、校准、配置与二进制哈希"]:::check
+  freeze["复制并校验独立运行副本，重定位检查点路径<br/>正式任务仍从原迁移检查点出发"]:::check
+  train["正式训练：恢复步兵 → 从零训练哨兵<br/>累计十亿步目标；最终测试与预算 / 战斗 / 热锁分别报告"]:::train
+  collision["碰撞回归报告<br/>原错误复现 + 修复通过"]:::check
+  blocked["任何发布核查失败<br/>保留失败与诊断<br/>阻止正式启动"]:::stop
+  pre --> cal
+  cal --> migration
+  migration --> qual
+  qual --> gate
+  gate --> freeze
+  freeze --> train
+  collision --> gate
+  gate --> blocked
+  classDef control fill:#eef5ff,stroke:#4475ad,color:#25394c
+  classDef train fill:#f0ecfa,stroke:#8465ac,color:#25394c
+  classDef check fill:#eaf5f0,stroke:#3d8066,color:#25394c
+  classDef warn fill:#fff4e5,stroke:#b67a28,color:#25394c
+  classDef stop fill:#fbeeee,stroke:#ad5454,color:#25394c
+  classDef neutral fill:#f3f5f8,stroke:#748296,color:#25394c

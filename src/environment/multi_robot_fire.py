@@ -17,8 +17,10 @@ def multi_robot_scenario(options):
     if not isinstance(options, dict) or set(options) - {"scenario"}:
         raise ValueError("reset options only supports scenario")
     scenario = options.get("scenario", {})
-    if not isinstance(scenario, dict) or set(scenario) - {"duel", "measurements", "unlimited_heat"}:
+    if not isinstance(scenario, dict) or set(scenario) - {"duel", "measurements", "unlimited_heat", "policy_start", "visibility_admission"}:
         raise ValueError("multi_robot_fire supports duel/measurements and real resources only")
+    if "visibility_admission" in scenario and scenario["visibility_admission"] != "full_path_clear":
+        raise ValueError("visibility_admission must be full_path_clear or omitted")
     if scenario.get("unlimited_heat", False) is not False:
         raise ValueError("multi_robot_fire requires normal heat")
     scenario["unlimited_heat"] = False

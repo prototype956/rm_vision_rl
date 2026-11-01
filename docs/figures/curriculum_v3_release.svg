@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1100" viewBox="0 0 1200 1100" role="img" aria-labelledby="title desc">
+<title id="title">课程 v3 修订 3：校准、迁移与正式发布</title><desc id="desc">适用于当前“步兵 v2 检查点迁移，哨兵从零训练”的发布入口。箭头表示证据依赖。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#61758a"/></marker></defs>
+<style>text{font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;fill:#25394c} .edge{fill:none;stroke:#61758a;stroke-width:2;marker-end:url(#arrow)} .label{font-size:16px;paint-order:stroke;stroke:white;stroke-width:7;stroke-linejoin:round}</style>
+<rect width="1200" height="1100" fill="white"/>
+<text x="35" y="40" font-size="25" text-anchor="start" font-weight="600">课程 v3 修订 3：校准、迁移与正式发布</text>
+<text x="35" y="72" font-size="16" text-anchor="start">适用于当前“步兵 v2 检查点迁移，哨兵从零训练”的发布入口。箭头表示证据依赖。</text>
+<path class="edge" d="M435,201 L435,245"/>
+<path class="edge" d="M435,331 L435,375"/>
+<path class="edge" d="M435,461 L435,505"/>
+<path class="edge" d="M435,591 L435,635"/>
+<path class="edge" d="M435,721 L435,765"/>
+<path class="edge" d="M435,851 L435,895"/>
+<path class="edge" d="M1035,591 L1035,678 L835,678"/>
+<path class="edge" d="M835,700 L875,700 L875,820 L900,820"/>
+<rect x="35" y="115" width="800" height="86" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="435.0" y="151.0" font-size="18" text-anchor="middle" font-weight="600">preflight：全路径可见性与物理准入</text>
+<text x="435.0" y="177.0" font-size="16" text-anchor="middle">冻结场景和证书，绑定原生二进制 / 配置身份</text>
+<rect x="35" y="245" width="800" height="86" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="435.0" y="281.0" font-size="18" text-anchor="middle" font-weight="600">calibrate：传统火控校准 → 冻结门槛 → 独立验证</text>
+<text x="435.0" y="307.0" font-size="16" text-anchor="middle">T1/T2：每车型 × 运动组合分别检查；测试集不调参</text>
+<rect x="35" y="375" width="800" height="86" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="435.0" y="411.0" font-size="18" text-anchor="middle" font-weight="600">显式迁移 v2 → v3，并隔离复评旧已解锁阶段</text>
+<text x="435.0" y="437.0" font-size="16" text-anchor="middle">recurrent.pt 字节不变，清旧晋级历史，定位未通过阶段</text>
+<rect x="35" y="505" width="800" height="86" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="435.0" y="541.0" font-size="18" text-anchor="middle" font-weight="600">benchmark：两角色各完成两次新增更新</text>
+<text x="435.0" y="567.0" font-size="16" text-anchor="middle">检查恢复、Actor 导出及配置 / 场景 / 校准身份</text>
+<rect x="35" y="635" width="800" height="86" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="435.0" y="671.0" font-size="18" text-anchor="middle" font-weight="600">run 发布核查：资格验证 + 原始 / 修复碰撞回归</text>
+<text x="435.0" y="697.0" font-size="16" text-anchor="middle">核对检查点、场景、校准、配置与二进制哈希</text>
+<rect x="35" y="765" width="800" height="86" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="435.0" y="801.0" font-size="18" text-anchor="middle" font-weight="600">复制并校验独立运行副本，重定位检查点路径</text>
+<text x="435.0" y="827.0" font-size="16" text-anchor="middle">正式任务仍从原迁移检查点出发</text>
+<rect x="35" y="895" width="800" height="86" rx="10" fill="#f0ecfa" stroke="#8465ac" stroke-width="1.5"/>
+<text x="435.0" y="931.0" font-size="18" text-anchor="middle" font-weight="600">正式训练：恢复步兵 → 从零训练哨兵</text>
+<text x="435.0" y="957.0" font-size="16" text-anchor="middle">累计十亿步目标；最终测试与预算 / 战斗 / 热锁分别报告</text>
+<rect x="900" y="505" width="270" height="86" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="1035.0" y="541.0" font-size="18" text-anchor="middle" font-weight="600">碰撞回归报告</text>
+<text x="1035.0" y="567.0" font-size="16" text-anchor="middle">原错误复现 + 修复通过</text>
+<rect x="900" y="765" width="270" height="110" rx="10" fill="#fbeeee" stroke="#ad5454" stroke-width="1.5"/>
+<text x="1035.0" y="800.0" font-size="18" text-anchor="middle" font-weight="600">任何发布核查失败</text>
+<text x="1035.0" y="826.0" font-size="16" text-anchor="middle">保留失败与诊断</text>
+<text x="1035.0" y="852.0" font-size="16" text-anchor="middle">阻止正式启动</text>
+<text x="35" y="1030" font-size="16" text-anchor="start">资格验证优化结果不作为正式训练起点；校准、验证和测试种子分离。旧修订证书与基线不能替代修订 3 证据。</text>
+<text x="35" y="1060" font-size="16" text-anchor="start">固定案例 MCAP 可在资格验证后显式录制；它用于诊断，不替代发布核查，也不按命中成绩选案例。</text>
+</svg>

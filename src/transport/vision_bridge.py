@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 import copy
 import json
+import os
+from src.transport.native_log import NativeLog
 from pathlib import Path
 import select
 import subprocess
@@ -44,6 +46,11 @@ class VisionBridge:
         self.process = process
         self.observation_mode = observation_mode
         self._prepared = None
+        self.recording = False
+        self.record_phase = "warming"
+        self.record_events = {}
+        self.event_history = {}
+        self._diagnostic_response = None
 
     def exchange(self, value):
         self.process.stdin.write(json.dumps(value, allow_nan=False, separators=(",", ":")) + "\n")
@@ -60,6 +67,8 @@ class VisionBridge:
 
     def reset(self, round_id):
         self.cancel()
+        self.event_history.clear()
+        self.record_events.clear()
         return self.exchange(dict(op="reset", round_id=round_id))
 
     def prepare(self, response, *, external=True):
@@ -82,9 +91,14 @@ class VisionBridge:
             raise RuntimeError("submit/ack or cancel the prepared cycle first")
         # 仅转发明确列出的控制字段，评估真值、事件、奖励、场景和种子不进入 C++。
         data = response["data"]
+        if self.recording or getattr(self, "collect_events", False):
+            for event in data.get("events", []):
+                self.event_history[event["event_id"]] = event
+        if self.recording:
+            self._diagnostic_response = copy.deepcopy(response)
         frames = copy.deepcopy(data["visual_frames"])
         referee = control_referee(data, response["sim_time_ns"]) if self.observation_mode == "legacy" else None
-        if self.observation_mode == "asymmetric_v1":
+        if self.observation_mode in ("asymmetric_v1", "asymmetric_gru_v1"):
             thermal = data["actor_feedback"]["thermal"]
             # Only sampled, own thermal/allowance information gates firing. No HP,
             # defense, feeder, exact allowance or hidden mechanism flags reach control.
@@ -141,6 +155,9 @@ class VisionBridge:
             request = dict(op="cancel")
         self.exchange(request)
         self._prepared = None
+        if self.recording and self._diagnostic_response is not None:
+            self.record_snapshot(self._diagnostic_response)
+            self._diagnostic_response = None
 
     def step(self, response, policy=None):
         result = self.prepare(response, external=policy is not None)
@@ -163,7 +180,32 @@ class VisionBridge:
         """将仿真命令发布结果反馈给 C++，成功交换后清除本地待处理周期。"""
         result = self.exchange(dict(op="ack", success=success))
         self._prepared = None
+        if self.recording:
+            self.record_snapshot(self._diagnostic_response)
+            self._diagnostic_response = None
         return result
+
+    def start_recording(self, path, info):
+        self.exchange(dict(op="record_start", path=str(path), info=info))
+        self.recording = True
+
+    def record_snapshot(self, response, *, summary=None):
+        for event in response["data"]["events"]:
+            previous = self.record_events.setdefault(event["event_id"], event)
+            if previous != event:
+                raise ValueError("conflicting replay event")
+        data = response["data"]
+        diagnostic = {k: response[k] for k in ("ok", "round_id", "sim_time_ns")}
+        diagnostic["data"] = {k: data[k] for k in ("evaluation", "events", "self_referee", "visual_frames")}
+        packet = dict(op="record_snapshot", response=diagnostic, phase=self.record_phase)
+        if summary is not None:
+            packet["summary"] = summary
+        return self.exchange(packet)
+
+    def close_recording(self, summary):
+        self.cancel()
+        self.exchange(dict(op="record_close", summary=summary))
+        self.recording = False
 
     def begin_training(self, round_id, start_ns, *, policy_mode="fire_only"):
         return self.exchange(dict(op="begin_training", round_id=round_id, start_ns=start_ns,
@@ -181,14 +223,15 @@ def vision_worker(binary, vision_root, output, *, diagnostics=None, observation_
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     config = output / "logger.json"
-    config.write_text(json.dumps(dict(schema_version=1, log_dir="logs", level="warn", console=False)))
-    with (output / "stderr.log").open("w") as log:
+    config.write_text(json.dumps(dict(schema_version=1, log_dir="logs", level="error" if os.environ.get("RM_BOUNDED_NATIVE_LOGS") == "1" else "warn", console=False)))
+    with NativeLog(output / "stderr.log") as log:
         command = [str(binary.resolve()), str(vision_root / "src/config/modules"), str(config)]
         if diagnostics is not None:
             command.append(str(diagnostics.resolve()))
         process = subprocess.Popen(command,
-                                   cwd=output, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
+                                   cwd=output, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log.output,
                                    text=True, bufsize=1)
+        log.spawned()
         try:
             bridge = VisionBridge(process, observation_mode)
             yield bridge

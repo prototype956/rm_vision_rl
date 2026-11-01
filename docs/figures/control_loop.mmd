@@ -1,0 +1,26 @@
+flowchart TB
+  sim["Rust 同步仿真<br/>物理 / 测量 / 自身反馈"]:::control
+  vision["C++ 视觉估计<br/>PnP → ArmorPredictor"]:::control
+  control["C++ 火控与执行<br/>弹道 → TinyMPC → 命令"]:::control
+  adapter["Python 观测适配<br/>v5 白名单 / 掩码 / 时钟"]:::control
+  actor["GRU Actor<br/>本地记忆 → 选板 / 请求开火"]:::control
+  score["独立评估与奖励统计<br/>事件 / 实际出膛 / 伤害"]:::train
+  critic["独立 GRU Critic<br/>合法观测 + 当前 privileged"]:::train
+  ppo["完整回合循环 PPO<br/>分别优化 Actor 与 Critic"]:::train
+  sim -->|"角点 / 反馈"| vision
+  vision -->|"估计与候选"| adapter
+  adapter -->|"Actor 输入"| actor
+  actor -->|"九动作"| control
+  control -->|"Python 提交 Advance，推进后 ack"| sim
+  sim -.->|"事件 / 结果"| score
+  sim -.->|"仅训练真值"| critic
+  adapter -.->|"合法观测"| critic
+  critic -.->|"价值"| ppo
+  actor -.->|"轨迹 / 行为概率"| ppo
+  score -.->|"训练：逐步奖励；评估尾部伤害不追加到 PPO"| ppo
+  classDef control fill:#eef5ff,stroke:#4475ad,color:#25394c
+  classDef train fill:#f0ecfa,stroke:#8465ac,color:#25394c
+  classDef check fill:#eaf5f0,stroke:#3d8066,color:#25394c
+  classDef warn fill:#fff4e5,stroke:#b67a28,color:#25394c
+  classDef stop fill:#fbeeee,stroke:#ad5454,color:#25394c
+  classDef neutral fill:#f3f5f8,stroke:#748296,color:#25394c

@@ -104,7 +104,15 @@
 
       <form id="view-form" class="card tool-form">
         <h2>回放 / 评估</h2>
-        <label>checkpoint<select id="view-checkpoint" required></select></label>
+        <label>模型来源<select id="view-source"><option value="checkpoint">训练 Checkpoint</option><option value="actor">导出 Actor</option></select></label>
+        <label>Checkpoint<select id="view-checkpoint"></select></label>
+        <label>Actor 目录<input id="view-actor" placeholder="artifacts/deployment/infantry-v2"></label>
+        <label><input id="view-mcap" type="checkbox">录制原生 Foxglove MCAP（GRU）</label>
+        <label><input id="view-combat-hud" type="checkbox" checked>附带可开关的战斗 HUD（仅 MCAP）</label>
+        <label>冻结场景清单<input id="view-scenarios" placeholder="artifacts/training/run/curriculum/scenarios.json"></label>
+        <div class="row"><label>场景集<select id="view-split"><option value="validation">验证集</option><option value="test">测试集</option></select></label><label>课程编号（从 0 开始）<input id="view-course" type="number" min="0" value="0"></label></div>
+        <label>case 编号（逗号分隔）<input id="view-cases" value="0"></label>
+        <p>MCAP 包含合成测量画布、PnP、预测、控制与战斗状态，可下载后用现有 Foxglove 工具分析。旧场景数量与随机 seed 仅用于非 MCAP 回放。</p>
         <div class="row"><label>场景数<input id="view-scene-count" type="number" min="1" value="1"></label><label>并行 worker<input id="view-workers" type="number" min="1" value="1"></label></div>
         <label>场景 seed（可选，逗号分隔）<input id="view-seeds" placeholder="留空使用默认场景"></label>
         <label>设备<input id="view-device" placeholder="沿用配置"></label>

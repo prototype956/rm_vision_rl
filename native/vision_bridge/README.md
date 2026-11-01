@@ -6,11 +6,11 @@
 
 ```bash
 cmake -S native/vision_bridge -B artifacts/build/vision-bridge \
-  -DVISION_ROOT=/home/dgx_spark/RM_VISION_WORKSPACE/rm_vision_2027 -DCMAKE_BUILD_TYPE=Release
+  -DVISION_ROOT="$(realpath ../rm_vision_2027)" -DCMAKE_BUILD_TYPE=Release
 cmake --build artifacts/build/vision-bridge --parallel 2
 ```
 
-生成 `artifacts/build/vision-bridge/rmvision-rl-bridge`：
+生成训练桥接 `rmvision-rl-bridge` 和比较专用 `rmvision-rule-bridge`，均位于 `artifacts/build/vision-bridge/`。前者用于策略回调与通用规则会话，后者允许传统 RulePolicy 接入共同决策时钟。训练桥接调用形式：
 
 ```text
 rmvision-rl-bridge CONFIG_MODULE_DIR LOGGER_YAML [DIAGNOSTICS_JSONL]
@@ -18,7 +18,7 @@ rmvision-rl-bridge CONFIG_MODULE_DIR LOGGER_YAML [DIAGNOSTICS_JSONL]
 
 `CONFIG_MODULE_DIR` 包含视觉模块 YAML，`LOGGER_YAML` 指定日志配置；可选诊断文件不进入策略观测。推荐由 Python `vision_worker` 管理进程和日志。桥接不依赖 OpenVINO 检测推理，C++ 依赖以 [CMakeLists.txt](CMakeLists.txt) 为准。
 
-Gym 在预热确认后使用 `begin_training(round_id, start_ns)` 开启无截止时间的只开火策略模式，
+Gym 在预热确认后使用 `begin_training(round_id, start_ns)` 开启无截止时间的训练模式；`policy_mode` 缺省为 `fire_only`，联合九动作显式传 `nine`，
 时间截断由 Python 环境管理。`step_policy` 返回带 token 的当周期 `policy_observation` 并暂停；
 `policy_action(token, action)` 恢复相同控制计算。命令提交给仿真后仍必须 `ack(success)`。
 
@@ -49,3 +49,6 @@ clang-tidy -p artifacts/build/vision-bridge native/vision_bridge/bridge.cpp
 工作区配置使用相邻的 `../rm_vision_2027` 作为视觉源码路径；目录布局不同时，调整
 `cmake.configureSettings.VISION_ROOT` 并重新生成编译数据库。不会沿用旧版 clangd 的
 诊断屏蔽规则；出现诊断时应先核对编译参数和依赖版本。
+
+
+`replay_diagnostics.cpp/.hpp` 负责原生 Foxglove MCAP 诊断。录制命令、结算状态和合成画布的适用范围见[GRU 回放](../../docs/running.md#gru-原生-foxglove-回放)。

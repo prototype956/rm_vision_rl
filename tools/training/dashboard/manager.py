@@ -235,7 +235,7 @@ class TrainingManager:
             "compare": ("compare-*/comparison.json", "comparison.json"),
             "diagnose": ("diagnose-*/run.json", "diagnostic-*/run.json", "diagnostic/run.json"),
             "benchmark": ("results.json",),
-            "view": ("eval-*/replay.json", "eval-scenes-*/*/replay.json"),
+            "view": ("eval-*/replay.json", "eval-scenes-*/*/replay.json", "foxglove-*/replay_index.json"),
             "manual": ("manual-*/run.json",),
         }.get(tool, ())
         try:
@@ -263,6 +263,8 @@ class TrainingManager:
         if tool == "benchmark":
             return ("complete" if isinstance(state, dict) and state.get("trials")
                     and (Path(record.get("output_dir", "")) / "report.md").is_file() else None)
+        if tool == "view" and path.name == "replay_index.json":
+            return state.get("status") if state.get("status") in {"complete", "failed"} else None
         if tool == "view":
             # replay.json and evaluation_scenes.json are terminal artifacts;
             # their payload shape intentionally has no status field.
@@ -519,7 +521,9 @@ class TrainingManager:
         except (TypeError, ValueError, OverflowError):
             created = 0.0
         names = {"report.html", "analysis.json", "comparison.html", "comparison.json",
-                 "parity.json", "results.json", "report.md", "replay.json", "playlist.json"}
+                 "parity.json", "results.json", "report.md", "replay.json", "playlist.json",
+                 "replay.mcap", "replay_index.json", "summary.json", "failure.json",
+                 "calibration.json", "report.json", "preflight.json"}
         files = []
         try:
             for path in search_root.rglob("*"):
@@ -542,8 +546,8 @@ class TrainingManager:
                       "label": relative} for relative, _ in files]
         result: dict[str, Any] = {"artifacts": artifacts}
         reports = [item for item in artifacts if item["path"].endswith(("report.html", "report.md"))]
-        replays = [item for item in artifacts if item["path"].endswith(("replay.json", "playlist.json"))]
-        results = [item for item in artifacts if item["path"].endswith(("results.json", "comparison.json", "analysis.json", "parity.json"))]
+        replays = [item for item in artifacts if item["path"].endswith(("replay.json", "playlist.json", "replay.mcap"))]
+        results = [item for item in artifacts if item["path"].endswith(("results.json", "comparison.json", "analysis.json", "parity.json", "replay_index.json"))]
         if reports:
             result["report_url"], result["report_path"] = reports[0]["url"], reports[0]["path"]
         if replays:
@@ -609,11 +613,22 @@ class TrainingManager:
     def get_run(self, run_id: str) -> dict[str, Any]:
         if not run_id or Path(run_id).name != run_id or run_id in {".", ".."}:
             raise RequestError("invalid run id")
-        path = (self.training_root / run_id).resolve()
+        if "::" in run_id:
+            parts = run_id.split("::")
+            if (len(parts) != 2 or not parts[0] or parts[0] in {".", ".."}
+                    or parts[1] not in {"infantry", "sentry"}):
+                raise RequestError("invalid role run id")
+            path = (self.training_root / parts[0] / parts[1]).resolve()
+        else:
+            path = (self.training_root / run_id).resolve()
         try:
             path.relative_to(self.training_root)
         except ValueError as error:
             raise RequestError("run id is outside artifacts/training") from error
         if not path.is_dir():
             raise RequestError("unknown run")
-        return run_summary(path)
+        summary = run_summary(path)
+        summary["run_id"] = run_id
+        if "::" in run_id:
+            summary.update(run_group=parts[0],run_role=parts[1])
+        return summary

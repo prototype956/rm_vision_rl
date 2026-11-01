@@ -83,6 +83,10 @@ class TrainingClient:
                             command=dict(valid=valid, yaw_rad=yaw_rad, pitch_rad=pitch_rad,
                                          distance_m=distance_m, fire=fire))
 
+    def begin_policy(self) -> dict:
+        """Apply one configured handover at the current step without advancing time."""
+        return self.request("begin_policy", round_id=self.round_id, step_id=self.step_id)
+
     def inspect(self) -> dict:
         return self.request("inspect")
 

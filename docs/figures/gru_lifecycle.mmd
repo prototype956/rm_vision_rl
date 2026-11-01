@@ -1,0 +1,25 @@
+flowchart TB
+  episode["新回合 episode_start"]:::warn
+  episodestate["目标 / 候选 / 云台 / 资源 / Critic 全部清零"]:::warn
+  target["新代次 / tracker reset / 首次进入 LOST"]:::warn
+  targetstate["目标与候选清零；云台 / 资源 / Critic 保留后更新"]:::warn
+  coast["短暂遮挡，仍未进入 LOST"]:::check
+  coaststate["全部状态继续更新；是否可开火由掩码决定"]:::check
+  map["可信 candidate_map 重排"]:::control
+  mapstate["候选记忆按新槽位 → 旧槽位置换；其余状态保留后更新"]:::control
+  badmap["candidate_map 无效"]:::warn
+  badmapstate["目标与候选清零，清本地返回槽位；其余状态保留后更新"]:::warn
+  padding["序列填充 active = false"]:::neutral
+  paddingstate["所有状态保持原值：不清零、不置换、不推进"]:::neutral
+  episode --> episodestate
+  target --> targetstate
+  coast --> coaststate
+  map --> mapstate
+  badmap --> badmapstate
+  padding --> paddingstate
+  classDef control fill:#eef5ff,stroke:#4475ad,color:#25394c
+  classDef train fill:#f0ecfa,stroke:#8465ac,color:#25394c
+  classDef check fill:#eaf5f0,stroke:#3d8066,color:#25394c
+  classDef warn fill:#fff4e5,stroke:#b67a28,color:#25394c
+  classDef stop fill:#fbeeee,stroke:#ad5454,color:#25394c
+  classDef neutral fill:#f3f5f8,stroke:#748296,color:#25394c

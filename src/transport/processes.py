@@ -1,6 +1,7 @@
 """管理训练子进程及其 socket，正常退出或检查失败时均回收资源。"""
 from contextlib import contextmanager
 import os
+from src.transport.native_log import NativeLog
 from pathlib import Path
 import subprocess
 import tempfile
@@ -19,7 +20,7 @@ def training_worker(sim_root, binary, log_path, config_path=None, *, physics_ste
         str(binary.parent / "deps"), str(Path(sysroot) / "lib"), rustlib,
         env.get("LD_LIBRARY_PATH", ""),
     ])
-    with tempfile.TemporaryDirectory(prefix="rm-rl-scenarios-") as directory, log_path.open("w") as log:
+    with tempfile.TemporaryDirectory(prefix="rm-rl-scenarios-") as directory, NativeLog(log_path) as log:
         path = Path(directory) / "training.sock"
         command = [
             str(binary), "--socket", str(path), "--config", str(config_path or sim_root / "config.toml"),
@@ -29,7 +30,8 @@ def training_worker(sim_root, binary, log_path, config_path=None, *, physics_ste
             if physics_step_us not in (500, 1000, 2000):
                 raise ValueError("physics step must be 500, 1000 or 2000 microseconds")
             command.extend(["--physics-step-us", str(physics_step_us)])
-        process = subprocess.Popen(command, cwd=sim_root, env=env, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, cwd=sim_root, env=env, stdout=log.output, stderr=subprocess.STDOUT)
+        log.spawned()
         client = None
         try:
             deadline = time.monotonic() + 30

@@ -1,90 +1,44 @@
 # 架构与代码职责
 
+本项目把物理推进、视觉火控、策略推理和训练优化分开。服务器运行完整闭环；部署时仅将 Actor 及其输入、状态契约交给 NUC。当前训练采用持续记忆 GRU，旧 MLP 通过独立兼容路径读取。
+
 ## 当前闭环
 
-```text
-Rust 同步仿真 daedalus_training
-  │ Unix socket：二维检测帧、自身反馈、裁判采样
-  ▼
-Python 会话管理
-  │ JSONL 标准输入/输出：只转发控制需要的字段
-  ▼
-C++ rmvision-rl-bridge
-  ├─ ArmorPnp → ArmorPredictor
-  ├─ ControlSession → 候选装甲板与动作掩码
-  ├─ 规则策略，或同步询问 Python 回调策略
-  └─ 弹道解算 → TinyMPC → 云台命令与开火脉冲
-  │
-  ▼
-Python 提交 Advance → 仿真推进 10 ms → 确认命令发布
-  └─ 独立事件和真值送入评估计分，不进入策略输入
-```
+![闭环数据流与训练信息边界](figures/control_loop.svg)
+
+图 1：控制观测通过视觉估计和 v5 白名单进入 Actor；仿真真值只进入独立 Critic 与评估通道。虚线表示仅训练或评估使用的数据。图中 PPO 接收的奖励只包含训练窗口内逐步奖励，独立评估尾部伤害不回写训练。
+
+[Mermaid 图源](figures/control_loop.mmd) · [生成与维护](figures/README.md)
 
 无渲染模式生成带噪二维角点，随后使用真实 PnP 和预测器。它不运行图像检测网络，也不把真实目标位置直接当作预测器输出。带图像的 Talos/视觉主程序是另一条链路，不由当前 Python 会话启动。
 
-## Python 运行库
+## 运行库与训练层
 
-| 文件 | 作用 |
+| 模块 | 职责 |
 | --- | --- |
-| [transport/client.py](../src/transport/client.py) | `TrainingClient`：仿真协议、请求/回合/步编号及未确认请求重取 |
-| [transport/processes.py](../src/transport/processes.py) | `training_worker`：启动仿真进程，分配独立 socket，设置动态库路径并回收进程 |
-| [transport/vision_bridge.py](../src/transport/vision_bridge.py) | `VisionBridge` / `vision_worker`：桥接通信、策略询问、动作与发布确认 |
-| [environment/warmup.py](../src/environment/warmup.py) | `WarmupSession`：禁射搜索、连续新帧确认、就绪或超时 |
-| [environment/evaluation.py](../src/environment/evaluation.py) | `EvaluationSession`：预热、正式窗口和尾部结算生命周期 |
-| [environment/fire.py](../src/environment/fire.py) | `FireEnv`：规则两动作/联合九动作 Gym 采样、时间截断和独立进程生命周期；静止/旋转子类提供场景规则 |
-| [training/environment.py](../src/training/environment.py) | 任务与场景序列适配、Monitor 和单环境 DummyVecEnv，覆盖自动 Reset |
-| [training/parallel.py](../src/training/parallel.py) | 多环境 SubprocVecEnv、独立随机流、进程与日志隔离、有界回收 |
-| [training/models.py](../src/training/models.py) | 模型构建/加载、观测契约及配置指纹、原子检查点 |
-| [training/train.py](../src/training/train.py) | 训练预算、完整更新、日志、周期保存和运行生命周期 |
-| [policy/observations.py](../src/policy/observations.py) | `encode` / `TensorPolicy`：语义字段编码、8 个控制周期的历史和有效性标记 |
-| [scoring/window.py](../src/scoring/window.py) | `WindowScore`：关联实际出膛与弹丸结果，计算窗口归属伤害 |
+| [transport/client.py](../src/transport/client.py)、[processes.py](../src/transport/processes.py) | 仿真事务编号、未确认请求重取、独立 socket 与进程回收 |
+| [transport/vision_bridge.py](../src/transport/vision_bridge.py) | JSONL 交互、同周期策略询问与动作提交、发布确认 |
+| [environment/warmup.py](../src/environment/warmup.py) | 禁射搜索、连续新图像帧确认与超时 |
+| [environment/fire.py](../src/environment/fire.py)、[multi_robot_fire.py](../src/environment/multi_robot_fire.py) | Gym 采样、物理资源、奖励与回合边界 |
+| [policy/recurrent_observations.py](../src/policy/recurrent_observations.py) | v5 单步输入、重置事件和候选槽位映射 |
+| [policy/recurrent_actor.py](../src/policy/recurrent_actor.py) | 目标、候选、云台与资源 GRU；选板和条件开火头 |
+| [training/recurrent_policy.py](../src/training/recurrent_policy.py) | 独立 Critic 及仅训练可见的真值编码 |
+| [training/recurrent_rollout.py](../src/training/recurrent_rollout.py) | 独立 worker、完整回合采集与更新屏障 |
+| [training/recurrent_ppo.py](../src/training/recurrent_ppo.py)、[sequence_storage.py](../src/training/sequence_storage.py) | 序列重放、预热、循环 PPO 和分块存储 |
+| [training/curriculum.py](../src/training/curriculum.py)、[curriculum_evaluation.py](../src/training/curriculum_evaluation.py) | 课程版本路由、固定场景、晋级与复核 |
+| [training/models.py](../src/training/models.py)、[runtime.py](../src/training/runtime.py) | 契约与指纹、检查点、长期保存和有界诊断 |
+| [training/offline_evaluation.py](../src/training/offline_evaluation.py)、[scoring/window.py](../src/scoring/window.py) | 共同离线评估、按实际出膛窗口归属计分 |
+| [policy/recurrent_deployment.py](../src/policy/recurrent_deployment.py) | Actor 导出、校验、本地状态管理与延迟记录 |
 
-`EvaluationSession` 接管仿真和桥接后，不应再从外部单独调用它们的步进接口，以免破坏控制、发布确认和计分时序。
+## 一个控制步如何完成
 
-`StaticFireEnv` 和 `RotationFireEnv` 通过公共 `FireEnv` 独占各自进程对。`reset()` 完成禁射预热后启动桥接训练模式，
-`prepare()` 在当周期策略回调处暂停并返回观测，`step(action)` 通过 `submit()` 恢复该回调，
-随后提交命令、推进一次物理并确认发布，再准备下一观测。无回调时缓存已计算的禁射命令，
-不跳过该周期。准备观测不推进物理，取消待决策周期不提交动作；取消后桥接必须 Reset。
-旧 `VisionBridge.step(response, policy)` 是这些操作的同步封装，原有评估调用方式不变。
+`reset()` 完成禁射预热后进入训练模式。`prepare()` 在当周期策略回调处暂停并返回观测；`step(action)` 通过 `submit()` 恢复同一次控制计算，提交命令、推进 10 ms 物理时间，再确认发布。无回调时仍提交已计算的禁射命令并推进物理，不跳过该周期。准备观测本身不推进世界；取消未提交周期后必须 Reset。
 
-训练模式没有评估截止时间开关。30 秒上限由 Gym 管理，截止时准备真实末观测后取消未提交
-周期，返回 `truncated=True`，不额外结算或自动 Reset。环境只给实际发生的伤害奖励，
-由训练器使用末观测价值自举；评估仍单独用 `WindowScore` 做实际出膛窗口归属和尾部结算。
+每个控制步更新一次 GRU。射击机会由独立的 50–100 ms 时钟门控，非到期步仍可选板和跟踪。回合重置清全部隐藏状态；目标代次重建或首次进入完整 LOST 时清目标与候选状态，短暂遮挡但跟踪状态仍保留时继续更新。具体输入与状态形状见[持续记忆 GRU](persistent_gru.md)。
 
-## PPO 与未来循环策略
+训练器让每个环境至少采集 `ppo.n_steps=512` 步，并完成当前回合后暂停。全部 128 个环境到达边界才统一更新，下一批回合使用新权重。实际样本数取决于完整回合长度，`512 × 128` 只是采集下限。序列长度 128、预热最多 32 步，每批 64 个片段；完整回合在 CPU 保存，小批次送入计算设备。
 
-当前配置使用 `algorithm=maskable_ppo`，支持固定槽位的 `mlp`、分解选板的
-`factorized_mlp` 和候选共享评分的 `shared_score_mlp`。模型构建/加载集中在
-`training.models`；Gym 和传输不依赖 PyTorch。`MultiInputPolicy` 在特征提取内部展平历史，
-环境输出 fire_only 的 `[8,90]` 或 joint 的 `[8,107]`，不额外做观测或奖励归一化。场景种子独立于 PPO seed。旋转任务在每次自动 Reset 采样下一场景；
-静止任务重用场景种子和参数，也会重复测量噪声。训练后选优使用多个共享随机场景的平均表现，
-仍不代表更大范围的泛化效果。
-
-单环境 `DummyVecEnv` 和多环境 `SubprocVecEnv` 均保留终止观测和 `TimeLimit.truncated`，
-MaskablePPO 负责价值自举。多环境各自运行完整仿真与视觉桥接，主进程批量推理并同步收集结果；
-每次 PPO 更新的样本数是 `n_steps × n_envs`。物理仍以 1 ms 步长推进。
-Monitor 在此之前记录原始伤害奖励，不把价值估计记成实际伤害。训练端每次只请求一个完整
-rollout 的 `learn(reset_num_timesteps=False)`，保持当前观测和优化器连续；固定学习率与
-clip 参数没有分段调度问题。更新结束后才记录损失并允许保存检查点。
-
-当前 MaskablePPO 不原生支持循环策略。将来接入 GRU 需要同时处理序列 rollout、隐藏状态、
-回合起点、目标重建和动作掩码，不能只替换 MLP 层，也不能把八行历史当成跨 rollout 的记忆。
-这些能力应放在训练/策略层，新增独立的模型与训练实现；当前不提供空的 GRU 类。
-检查点的策略类型和观测契约用于阻止不兼容加载。
-
-## 分析与验证工具
-
-`tools/training/` 单向依赖运行库和训练接口；`src/training/` 保留配置、环境包装、
-模型管理与 PPO 入口，不导入工具。训练结束后按需独立执行分析，训练命令不自动启动评估或窗口。
-
-| 文件 | 作用 |
-| --- | --- |
-| [tools/training/analysis.py](../tools/training/analysis.py) | 训练结束后的检查点评估、最佳模型选优、独立分析产物及双窗口编排 |
-| [tools/training/report.py](../tools/training/report.py) | 从日志和评估结果生成离线交互曲线与模型对比报告 |
-| [tools/training/view.py](../tools/training/view.py) | 单模型确定性评估、真值回放记录及单／多回放进程管理 |
-| [tools/training/manual.py](../tools/training/manual.py) | 原生窗口 JSONL 操作、手动 Gym 步进、原始奖励日志及进程清理 |
-| [tools/training/diagnose.py](../tools/training/diagnose.py) | 短期 PPO 更新的学习信号诊断 |
-| [tools/training/diagnostic_report.py](../tools/training/diagnostic_report.py) | 诊断数据关联与可视化报告 |
+自然终止的价值自举为零；时间截断使用旧回合真实末观测和该回合 Critic 状态。训练奖励只包含实际发生的伤害及配置成本，不追加评估尾部伤害。独立评估关窗后自然结算在途弹丸；`EvaluationSession` 接管进程后，外部不得另行推进仿真或桥接。
 
 ## C++ 桥接
 
@@ -95,6 +49,8 @@ clip 参数没有分段调度问题。更新结束后才记录损失并允许保
 | [CMakeLists.txt](../native/vision_bridge/CMakeLists.txt) | 从 `VISION_ROOT` 编译 PnP、预测器、火控、轨迹规划及 TinyMPC |
 
 桥接不需要相机 SDK 或 OpenVINO 检测推理，但需要 OpenCV、Eigen、Ceres 等依赖。视觉源码改变后，需要重新构建桥接才能使用新实现。
+
+比较传统火控时使用独立目标 `rmvision-rule-bridge`，其 RulePolicy 与模型使用共同射击机会时钟。原生回放诊断由 `replay_diagnostics.cpp/.hpp` 提供。
 
 ## 时间与信息边界
 
@@ -112,17 +68,14 @@ clip 参数没有分段调度问题。更新结束后才记录损失并允许保
 
 策略输入来自目标估计、自身反馈和自身裁判数据。种子、实验倒计时、真实目标状态、实际伤害和完整事件账本不送给策略。`EvaluationSession.advance()` 的完整返回对象包含评估真值，不能整体作为网络输入。
 
-Python 仅合并自身武器通道的机械间隔、供弹忙和枪口无效三个位，避免把 50 ms 的机械冷却锁在 100 ms 裁判采样周期里。热量、生命和弹量继续使用裁判快照；物理后端仍最终裁决每次出膛。合成检测的整板可见性测试排除小弹丸，防止开火本身造成系统性的虚假暂时丢失。
+旧观测路径的 Python 仅合并自身武器通道的机械间隔、供弹忙和枪口无效三个位，避免把 50 ms 的机械冷却锁在 100 ms 裁判采样周期里。热量、生命和弹量继续使用裁判快照；物理后端仍最终裁决每次出膛。合成检测的整板可见性测试排除小弹丸，防止开火本身造成系统性的虚假暂时丢失。
 
-当前己方底盘固定，目标支持静止、正弦平移或匀速旋转。合成观测的几何可见性近似不等价于真实渲染检测结果，限制见[当前状态](development.md)。
+`self_weapon` 机械状态合并属于旧观测路径。当前非对称 v4/v5 路径以 Actor 可知的热量、额度、有效性及本地时钟生成限制，不读取即时仿真综合许可；物理后端仍裁决实际出膛。
 
-## 联合策略的数据流
+双方底盘可执行静止、旋转、平移和复合脚本，通用环境另支持特定机构/地形模板；课程只启用其中一部分。合成可见性近似及部署边界见[开发状态](development.md)。
 
-`environment.action_mode` 与静止/旋转任务独立。`make_policy` 创建共用 `DecisionPolicy`
-生命周期的两动作或联合策略；Gym、独立评估都在预热后启动时钟，每个已完成物理步后推进一次。
-`TensorPolicy` 根据 v1/v2 schema 编码历史，目标代次变化只清历史，不重置射击时钟。
+## 工具依赖与兼容路径
 
-联合模式通过桥接 `begin_training(policy_mode="nine")` 获取所有有效弹道候选，跳过
-`FireOnlyPolicyAdapter`。RL 输出槽位和射击请求，C++ 核心负责该槽位的弹道、MPC 和执行门控。
-观测中的当前/命中朝向及选板时长均由估计和控制历史生成，真值只写入日志/回放。
-`tools.training.compare` 先确定共同合法出生，再用相同 seed 和场景分别重置两策略，不重采样失败场景。
+`tools/training/` 单向依赖运行库和训练接口，`src/training/` 不导入工具。课程内验证和最终测试由训练器执行；工具另行生成报告、诊断或回放。当前工具入口见[辅助工具](../tools/README.md)。
+
+旧 MLP 使用 `MaskablePPO`、短历史观测和 SB3 向量环境；该路径的 `n_steps × n_envs` 固定 rollout 语义不适用于完整回合 GRU。历史结构与动作概率契约见[历史接口](legacy_interfaces.md)。

@@ -60,8 +60,10 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     for role in ("infantry", "sentry"):
-        config = read_config(ROOT / f"config/training/rmul_2027_multirobot_{role}.json")
-        assert config["n_envs"] == 1
+        config = read_config(ROOT / f"config/training/rmul_2027_{role}_curriculum_v2.json")
+        assert config["curriculum"]["version"] == 2
+        assert config["environment"]["scenario"]["duel"]["controlled"]["preset"] == (
+            "sentry" if role == "sentry" else "infantry_health_cooling")
     kwargs = dict(action_mode="joint", selection_memory=True,
                   simulator_root=args.simulator_root, vision_root=args.vision_root,
                   log_dir=args.output / "episodes")

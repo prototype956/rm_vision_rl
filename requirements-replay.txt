@@ -1,0 +1,4 @@
+# Optional explicit MCAP HUD / offline rendering. Does not change training dependencies.
+numpy>=2.0
+mcap==1.6.0
+mcap-protobuf-support==0.6.0

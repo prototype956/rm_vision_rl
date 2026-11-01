@@ -4,10 +4,20 @@
 就绪判断仅使用检测、估计结果和自身遥测。
 """
 from dataclasses import asdict, dataclass
+import copy
 
 
 STEP_NS = 10_000_000
 EPOCH_NS = 10**18
+
+
+class TrackingInitializationTimeout(TimeoutError):
+    """A completed visual preflight failed; transport timeouts are not admission failures."""
+
+    def __init__(self, info, *, phase="tracking"):
+        self.info = copy.deepcopy(info)
+        self.phase = phase
+        super().__init__(f"fire-target warmup timed out ({phase}): {self.info}")
 
 
 @dataclass(frozen=True)

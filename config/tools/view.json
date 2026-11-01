@@ -10,5 +10,12 @@
   "scene_count": 8,
   "scene_seeds": [],
   "workers": 8,
-  "scene_seed": null
+  "scene_seed": null,
+  "actor": null,
+  "record_mcap": false,
+  "combat_hud": true,
+  "scenarios": null,
+  "split": "validation",
+  "course": null,
+  "cases": []
 }

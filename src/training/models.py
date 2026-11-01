@@ -1,7 +1,6 @@
 """创建模型并管理包含配置元数据的检查点，供训练和评估入口复用。
 
-当前仅支持无循环状态的 MaskablePPO/MLP。接入循环策略时，还需实现序列采样、
-隐藏状态复位和动作掩码，不能只增加 GRU 层。
+MLP 沿用 SB3；持续 GRU 由 recurrent_ppo 管理完整回合采样和序列优化。
 """
 import copy
 import hashlib
@@ -71,6 +70,9 @@ def observation_contract(env):
         from src.policy.asymmetric_observations import SCHEMA as actor_schema
         from src.policy.privileged import CONTRACT as critic_schema
         contract.update(version=4, schema_sha256=_digest(actor_schema), critic=critic_schema)
+    if "dt_s" in env.observation_space.spaces:
+        from src.policy.recurrent_observations import SCHEMA as recurrent_schema
+        contract.update(version=5, schema_sha256=_digest(recurrent_schema))
     return contract
 
 
@@ -98,13 +100,35 @@ def training_metadata(config, env):
                          ("torch", "stable-baselines3", "sb3-contrib", "gymnasium", "numpy", "tensorboard")},
     }
 
-    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp", "asymmetric_mlp"):
+    if "curriculum" in config:
+        from src.training.curriculum_v2 import digest
+        from src.training.curriculum import implementation
+        curriculum_module = implementation(config["curriculum"])
+        bank = curriculum_module.bank
+        role = config["environment"]["scenario"]["duel"]["controlled"]["preset"]
+        result["fingerprints"]["native_training"] = _file_digest(Path(settings["simulator_binary"]))
+        result["fingerprints"]["curriculum_source"] = _file_digest(Path(curriculum_module.__file__))
+        result["fingerprints"]["curriculum"] = digest(dict(config=config["curriculum"], validation=bank(role, config["curriculum"]), test=bank(role, config["curriculum"], True)))
+        result["fingerprints"]["v2_sources"] = {name:_file_digest(Path(__file__).with_name(name)) for name in
+            ("curriculum_v2.py", "thermal_reward.py", "sequence_storage.py", "recurrent_ppo.py", "runtime.py")}
+        result["fingerprints"]["reward"] = _digest(dict(thermal=config.get("thermal_reward"),
+            selection=config.get("selection_reward"), scale=config["reward_scale"]))
+        result["fingerprints"]["vision_bridge"] = _file_digest(Path(settings["bridge_binary"]))
+        source_root = Path(__file__).resolve().parents[1]
+        result["fingerprints"]["python_sources"] = {str(p.relative_to(source_root)):_file_digest(p)
+            for p in sorted(source_root.rglob("*.py"))}
+        result["fingerprints"]["training_contract"] = _digest({k:v for k,v in config.items() if k != "device"})
+
+    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp", "asymmetric_mlp", "asymmetric_gru"):
         result["policy_contract"] = copy.deepcopy(_policy_contract(config["policy_kind"]))
     return result
 
 
 def _policy_contract(policy_kind):
     """Return the architecture contract for custom actor policies."""
+    if policy_kind == "asymmetric_gru":
+        from src.policy.recurrent_actor import CONTRACT
+        return CONTRACT
     if policy_kind == "factorized_mlp":
         from src.training.factorized_policy import CONTRACT
         return CONTRACT
@@ -147,6 +171,8 @@ def _check_policy_contract(config, metadata):
 
 def build_model(config, env):
     config = validate_config(config)
+    if config["policy_kind"] == "asymmetric_gru":
+        raise ValueError("use the episode-barrier recurrent trainer for GRU")
     params = copy.deepcopy(config["ppo"])
     architecture = params.pop("net_arch")
     torch.set_num_threads(config["torch_threads"])
@@ -181,6 +207,9 @@ def read_checkpoint_metadata(path):
 def load_model(path, env, *, device=None):
     """恢复策略与优化器，并在下次 learn/reset 时开始新的仿真回合。"""
     metadata = read_checkpoint_metadata(path)
+    if metadata["config"]["policy_kind"] == "asymmetric_gru":
+        raise ValueError("GRU requires explicit persistent state; use RecurrentPPO.load, "
+                         "recurrent_deploy or recurrent_compare instead of legacy MLP tools")
     config = copy.deepcopy(metadata["config"])
     if device is not None:
         config["device"] = device

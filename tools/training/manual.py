@@ -30,9 +30,11 @@ CSV_FIELDS = ("episode", "step", "time_s", "action", "fire_legal_before", "fire_
 class ManualSession:
     """每个协议请求恰好执行一次 Gym 操作，重置必须由调用方显式请求。"""
 
-    def __init__(self, env, writer, file, *, original_episode_steps, override=False, model=None):
+    def __init__(self, env, writer, file, *, original_episode_steps, override=False, model=None,
+                 curriculum_role=None, scene_seed=17):
         self.env, self.writer, self.file = env, writer, file
         self.model = model
+        self.curriculum_role, self.scene_seed = curriculum_role, scene_seed
         self.original_episode_steps, self.override = original_episode_steps, override
         self.episode, self.step, self.total, self.hits = 0, 0, 0.0, 0
         self.last_reward, self.last_step = None, None
@@ -45,7 +47,12 @@ class ManualSession:
     def execute(self, request):
         operation = request["op"]
         if operation == "reset":
-            self.obs, info = self.env.reset()
+            if self.curriculum_role is None:
+                self.obs, info = self.env.reset()
+            else:
+                from src.training.curriculum_v2 import scene
+                descriptor = scene(0,self.scene_seed+self.episode,self.curriculum_role)
+                self.obs, info = self.env.reset(options={"curriculum_scene":descriptor})
             self.episode += 1
             self.step, self.total = 0, 0.0
             self.last_reward, self.last_step, self.hits = None, None, 0
@@ -191,8 +198,10 @@ def run_manual(config=None, *, checkpoint=None, episode_steps=None, output_dir=N
             writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
             writer.writeheader()
             csv_file.flush()
+            role = config["environment"]["scenario"]["duel"]["controlled"]["preset"] if "curriculum" in config and not saved else None
             session = ManualSession(env, writer, csv_file, original_episode_steps=original_steps,
-                                    override=episode_steps is not None, model=model)
+                                    override=episode_steps is not None, model=model,
+                                    curriculum_role=role,scene_seed=config["environment"]["scene_seed"])
             base = env.unwrapped
             viewer_args = [str(binary), "--manual", "--config", str(base.simulator_config),
                            "--assets", str(base.simulator_root / "assets")]

@@ -43,7 +43,7 @@ TOOL_FIELDS = {
     },
     "view": {
         "mode", "checkpoint", "replay", "output_dir", "device", "scene_count",
-        "scene_seeds", "workers", "scene_seed", "open_view",
+        "scene_seeds", "workers", "scene_seed", "actor", "record_mcap", "combat_hud", "scenarios", "split", "course", "cases", "open_view",
     },
     "manual": {
         "mode", "config", "preset", "checkpoint", "episode_steps", "output_dir", "scene_seed",
@@ -354,10 +354,15 @@ def validate_tool_payload(tool: Any, payload: Any, root: Path = ROOT) -> dict[st
             values["updates"] = _tool_integer(updates, "updates")
     elif tool == "view":
         mode = values.get("mode", "checkpoint")
-        if mode not in ("checkpoint", "replay"):
+        if mode not in ("checkpoint", "actor", "replay"):
             raise RequestError("web view supports checkpoint or replay mode")
         values["mode"] = mode
-        if mode == "checkpoint":
+        if mode == "actor":
+            values["actor"] = str(_tool_path(root, values.get("actor"), "actor", base=artifacts_root, must_exist=True, directory=True))
+            values["checkpoint"] = None
+            values["replay"] = None
+        elif mode == "checkpoint":
+            values["actor"] = None
             values["checkpoint"] = str(_tool_path(root, values.get("checkpoint"), "checkpoint",
                                                    base=training_root, must_exist=True))
             if Path(values["checkpoint"]).suffix != ".zip":
@@ -370,6 +375,21 @@ def validate_tool_payload(tool: Any, payload: Any, root: Path = ROOT) -> dict[st
         values["output_dir"] = str(_tool_path(root, values.get("output_dir"), "output_dir",
                                                base=artifacts_root))
         values["device"] = _tool_device(values.get("device"))
+        if type(values.get("record_mcap", False)) is not bool:
+            raise RequestError("record_mcap must be boolean")
+        values["combat_hud"] = _boolean(values.get("combat_hud", True), "combat_hud")
+        if values.get("record_mcap") or mode == "actor":
+            if mode == "replay":
+                raise RequestError("MCAP recording requires a model")
+            values["record_mcap"] = True
+            values["scenarios"] = str(_tool_path(root, values.get("scenarios"), "scenarios", base=artifacts_root, must_exist=True))
+            values["course"] = _tool_integer(values.get("course"), "course", minimum=0)
+            cases = values.get("cases")
+            if not isinstance(cases, list) or not cases or len(set(cases)) != len(cases):
+                raise RequestError("select unique frozen cases")
+            values["cases"] = [_tool_integer(c, "case", minimum=0) for c in cases]
+            if values.get("split", "validation") not in ("validation", "test"):
+                raise RequestError("invalid scene split")
         values["scene_count"] = _tool_integer(values.get("scene_count", 1), "scene_count")
         values["workers"] = _tool_integer(values.get("workers", 4), "workers")
         seeds = values.get("scene_seeds", [])
@@ -414,7 +434,7 @@ def validate_tool_payload(tool: Any, payload: Any, root: Path = ROOT) -> dict[st
         "diagnose": {"checkpoint", "rollouts", "device", "output_dir"},
         "benchmark": {"config", "output_dir", "n_envs", "repeats", "rollout_mode", "timesteps", "updates"},
         "view": {"mode", "checkpoint", "replay", "device", "output_dir", "viewer_binary", "label",
-                 "open_view", "scene_count", "scene_seeds", "workers", "scene_seed"},
+                 "open_view", "scene_count", "scene_seeds", "workers", "scene_seed", "actor", "record_mcap", "combat_hud", "scenarios", "split", "course", "cases"},
         "manual": {"mode", "config", "checkpoint", "episode_steps", "output_dir", "viewer_binary", "scene_seed"},
     }[tool]
     return {key: values.get(key) for key in allowed if key in values}

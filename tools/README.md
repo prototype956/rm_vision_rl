@@ -6,7 +6,29 @@
 工具参数默认从 `config/tools/<tool>.json` 读取，也可以用 `--config PATH` 切换配置；显式命令行参数覆盖配置文件。
 每次运行会在产物目录保存最终生效的 `tool_config.json`。
 
-## 训练分析与人工验证
+## 按任务选择工具
+
+| 任务 | 模块 | 说明 |
+| --- | --- | --- |
+| v2 预检、资格验证、正式训练 | `curriculum_v2` | 默认配置仍为步兵 v2 |
+| v2 冻结运行 | `curriculum_v2_pipeline` | 校验并复制运行环境 |
+| v3 预检、传统校准、资格验证、正式发布 | `curriculum_v3` | 发布修订 3，须提供校准和验收证据 |
+| v3 固定案例成对 MCAP | `curriculum_v3_replays` | 预先选定案例，不按成绩挑选 |
+| 课程报告与诊断 | `curriculum_report`、`curriculum_v2_diagnostics` | 报告支持 v2/v3 的角色目录或任务组 |
+| 检查点迁移 | `checkpoint_migration clearance / warmup / curriculum` | 共用载荷保存逻辑，各模式保留独立兼容性门禁 |
+| v2 冻结副本检查 | `curriculum_v2 check-snapshot` | 检查运行路径、控制时钟和初始热锁 |
+| Actor 导出与本地仿真部署 | `recurrent_export`、`recurrent_deploy` | v5 GRU Actor |
+| GRU Checkpoint/Actor MCAP | `view --record-mcap` | 共同离线评估器与冻结场景 |
+| 手动 C0 场景 | `manual --mode config` | 不训练、不晋级 |
+
+完整流程见[课程 v2](../docs/curriculum_training_v2.md)、[课程 v3](../docs/curriculum_training_v3.md)，导出与状态管理见[持续记忆 GRU](../docs/persistent_gru.md)。`config/training/` 有两类角色各自的 v2/v3 四份预设。
+
+通用 `benchmark` 默认读取步兵 v2，会进入完整课程预检和最终评估；短资格验证使用对应版本的专用 `curriculum_v2/v3 benchmark`。
+
+## 历史 MLP 分析与人工验证
+
+下列模型分析、对比、诊断和实时检查点查看工具用于已有 MLP 实验；
+GRU 使用上表工具；`view` 的 `--record-mcap` 是 GRU 专用分支。独立回放不受模型类型限制。
 
 | 文件 | 职责 |
 | --- | --- |
@@ -73,10 +95,30 @@ config/tools/dashboard.json
 
 历史 `tools.validation` 等验收命令不再使用。
 
-默认手动环境每回合随机生成原地旋转靶，R 切换下一场景。当前唯一保留的新训练配置为
-`config/training/rotation_joint_shared_score_ppo.json`；已有静止靶检查点仍可继续评估。
-检查点评估默认使用 5 个由保存场景种子派生的共享随机场景，
-按平均窗口归属伤害选优；不将该评估集合分数解释为更大范围的泛化表现。
+当前配置模式的手动环境读取步兵或哨兵 v2 预设，按 C0 生成场景，R 使用下一个场景种子。
+使用 `--mode config --training-config config/training/rmul_2027_infantry_curriculum_v2.json`。
+默认工具配置中的 `checkpoint` 模式仍读取指定的历史 MLP 检查点。
 
-默认手动模式用 1–4 选板、F 请求射击，R 换场景。joint 使用 107 维特征和九动作；检查点工具自动选择保存模式。
-离线 `view` 未指定 `scene_seeds` 时，每次运行随机生成场景种子；本次实际种子会写入 `tool_config.json` 和回放元数据。
+手动操作使用 1–4 选板、F 请求射击；当前配置采用 v5 单步观测和九动作。
+历史模型工具按检查点内保存的契约加载。离线 `view` 未指定 `scene_seeds` 时随机生成种子，
+实际种子写入 `tool_config.json` 和回放元数据。
+
+
+旧 MLP 的详细参数、选优规则和诊断产物见[历史工具文档](../docs/legacy_mlp.md)。
+
+## 工具维护与临时产物
+
+`tests/` 保留行为回归测试；迁移、发布和离线评估的测试分别归入
+`test_checkpoint_migration.py`、`test_curriculum_release.py` 和 `test_offline_evaluation.py`。
+测试临时文件使用 `TemporaryDirectory`；报告、截图、诊断日志和录制输出写到
+`artifacts/` 或调用方指定的新目录，不写进测试与工具源码目录。
+
+三种迁移共用 `python -m tools.training.checkpoint_migration <模式>`，
+均要求 `--checkpoint`、`--destination`、`--config`；`curriculum` 另需
+`--scenarios` 与 `--output`。模式分别保留原净空修复、预热修复和 v2→v3 的白名单，
+不允许通过选择其他模式放宽训练契约。迁移不会自动替换原检查点。
+
+课程报告使用 `python -m tools.training.curriculum_report --run <角色目录或任务组>`。
+资格覆盖、历史基线例外与动态库检查集中在 `curriculum_v3_release.py`，
+仍由 v3 入口调用，所有原有发布门槛保留。固定历史目录、日志字符串和
+3,800,921 步检查点的 `resume_clearance_pipeline` 一次性入口已删除。

@@ -1,6 +1,6 @@
 # Actor / Critic 观测契约与分离训练
 
-本轮接口是 `observation_mode=asymmetric_v1`、Actor schema **v4**、Critic schema **v1**，策略为 `asymmetric_mlp`（架构契约 v2）。旧版模型不能直接加载到新版环境，必须重新训练。四块预测装甲、九动作、8 × 10 ms 历史、原有选板奖励和决策时钟保持原定义。步兵、哨兵使用同一输入结构，分别使用 `config/training/rmul_2027_multirobot_{infantry,sentry}.json`。
+本页描述历史 MLP 的接口： `observation_mode=asymmetric_v1`、Actor schema **v4**、Critic schema **v1**，策略为 `asymmetric_mlp`（架构契约 v2）。旧版模型不能直接加载到新版环境，必须重新训练。四块预测装甲、九动作、8 × 10 ms 历史、原有选板奖励和决策时钟保持原定义。步兵、哨兵使用同一输入结构。本页保留 v4 MLP 契约供历史检查点使用；当前训练支持 [v2](curriculum_training_v2.md) 和 [v3](curriculum_training_v3.md) 课程，采用 [v5 GRU](persistent_gru.md)，不再提供 MLP 训练预设。
 
 ## Actor 的输入与坐标
 
@@ -20,7 +20,7 @@
 
 未曾观测的候选：`seen_before=0`，年龄以 10 s 编码；无预测年龄以 1 s 编码。无开火请求：`request_age_known=0`，请求年龄以 10 s 编码。这些缺失标记与年龄同时使用。`detected` 只来自估计器接受的图像装甲关联，不来自仿真可见性真值；不等于 `ballistic_valid`。无效弹道只清除弹道特征，观测历史标记仍可存在。
 
-热量等资源来自每 100 ms 采样一次的可靠自身反馈，控制周期保持最近样本，时间和有效性独立保留。本轮不注入丢包、乱序或随机延迟。`allowance_remaining=-1` 表示配置的无限额度（联盟赛训练配置使用有限额度）。热量上限和基础冷却来自本回合选定的上位机资源配置；不是从裁判瞬时许可或机构状态推断。冷却增益只改变有效冷却速率。
+热量等资源来自每 100 ms 采样一次的可靠自身反馈，控制周期保持最近样本，时间和有效性独立保留。该观测接口不注入丢包、乱序或随机延迟。`allowance_remaining=-1` 表示配置的无限额度（联盟赛训练配置使用有限额度）。热量上限和基础冷却来自本回合选定的上位机资源配置；不是从裁判瞬时许可或机构状态推断。冷却增益只改变有效冷却速率。
 
 Actor 白名单没有防御增益、双方 HP、实际出弹/测速、摩擦轮、拨弹盘、物理弹仓余弹、底盘速度、升降/折叠状态、原始 RFID 或综合开火许可。弹道仍用视觉配置中的标定弹速。
 
@@ -48,32 +48,12 @@ PPO rollout 保留采样动作、对应的 `log_probs` 和采样时掩码；环�
 
 `export_actor` 产生 `actor-XXXX.pt` 和 `.pt.json`，TorchScript 文件只含 Actor 参数。调用输入为上面列出的 Actor 字典（批量维在前），无需 `privileged`；输出为切板概率 `[B,5]`、条件开火概率 `[B,4]`、分层确定性动作 `[B]`。实车适配器负责准备语义观测、维护 8 步历史、同一份本地掩码和时钟。
 
-IMU 数据接口：`valid, sample_ns, orientation_xyzw, gyro_rad_s[3]`，姿态顺序 xyzw；热量接口：`valid, sample_ns, sequence, heat, heat_limit, base_cooling_per_second, allowance_remaining, cooling_active, cooling_remaining_s, effective_cooling_per_second`。时间使用上位机统一的单调时钟。冷却适配器可从底层 RFID/裁判状态生成该接口，不把原始 RFID 输入网络。本轮只定义并验证这个接口，不移植串口链路和固件。
+IMU 数据接口：`valid, sample_ns, orientation_xyzw, gyro_rad_s[3]`，姿态顺序 xyzw；热量接口：`valid, sample_ns, sequence, heat, heat_limit, base_cooling_per_second, allowance_remaining, cooling_active, cooling_remaining_s, effective_cooling_per_second`。时间使用上位机统一的单调时钟。冷却适配器可从底层 RFID/裁判状态生成该接口，不把原始 RFID 输入网络。该阶段定义并验证了此接口，不移植串口链路和固件。
 
-## NUC 采样、服务器更新
+## 历史 MLP 分离训练
 
-NUC 编译仿真和桥接后，使用同一份源码。服务器只安装 `requirements-training.txt`，不需要启动仿真和视觉程序。`src.training.split` 使用带 SHA256 配对的 checkpoint/NPZ 文件交换；NPZ 禁用 pickle，校验行为策略、版本、形状和有限数值。每次更新后才发布 ready 文件，传输时最后传 ready 文件。
+`src.training.split` 保留用于已有 MLP 实验，使用检查点或实验目录内保存的原始配置；
+仓库不再提供新的 MLP 预设。这一分离采集协议不用于 GRU。
 
-NUC（以步兵为例；哨兵换配置和独立输出目录）：
-
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-cd /home/nuc/Workspace/rm_vision_rl
-.venv-rmul/bin/python -m src.training.split collect \
-  --config config/training/rmul_2027_multirobot_infantry.json \
-  --output artifacts/my-infantry-run --updates 2
-```
-
-首轮生成 `rollout-0000.zip/.npz/.ready.json`。用 SSH/SFTP 将三者复制到服务器。服务器在相同源码的根目录运行：
-
-```bash
-python -m src.training.split update \
-  --checkpoint INPUT/rollout-0000.zip --batch INPUT/rollout-0000.npz \
-  --output OUTPUT/update-0000 --device cpu
-```
-
-把服务器产生的 `policy-0000.zip` 和 `policy-0000.ready.json` 传回 NUC 的 `artifacts/my-infantry-run/`，最后发布 ready 文件。NUC 保留原生进程、场景随机流、估计器、当前观测和历史，加载新权重后继续第二轮；不会因为等服务器而推进仿真。重复编号即可。可同时取回 Actor 导出文件，部署不需要训练 checkpoint。完整 SB3 检查点的跨机加载应保持 NumPy 大版本兼容；本轮 NUC 使用 1.24.4、服务器使用 1.26.4。持续采样回传只加载张量参数和优化器，不反序列化服务器上的环境对象。CUDA 更新要求服务器安装匹配的 CUDA PyTorch；短程验收采用 CPU。
-
-服务器训练使用的源码快照位于 `/data/prototype956/rm_vision/rm_vision_rl/artifacts/asymmetric-runtime`，解释器为原项目 `.venv-asymmetric/bin/python`。该隔离快照用于避免覆盖服务器原有源码；长期使用时应同步并核对同一版本。
-
-旧观测模式保留用于旧实验。新版短程模型仅用于验证采样、优化、保存加载和独立推理链路，不代表模型已收敛或完成实车验证。
+当前 v2/v3 课程由服务器同时运行仿真、视觉、采样和更新；NUC 仅接收导出的 Actor。
+训练、恢复及部署方法见 [持续记忆 GRU](persistent_gru.md) 和 [课程 v2](curriculum_training_v2.md)。

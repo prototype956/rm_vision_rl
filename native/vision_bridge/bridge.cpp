@@ -4,6 +4,7 @@
 #include "modules/fire_control/control_session.hpp"
 #include "modules/fire_control/fire_only_policy_adapter.hpp"
 #include "policy_wire.hpp"
+#include "replay_diagnostics.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -93,6 +94,26 @@ class Bridge {
    */
   Json Handle(const Json& request) {
     const std::string op = request.at("op");
+    if (op == "record_start") {
+      Keys(request, {"op", "path", "info"});
+      Require(!replay_, "recording already started");
+      replay_ = std::make_unique<rmvision_rl::ReplayDiagnostics>(
+          request.at("path"), request.at("info"), modules::ParseArmorPnpConfig(Load("armor_pnp")));
+      return {{"ok", true}};
+    }
+    if (op == "record_snapshot") {
+      Keys(request, {"op", "response", "phase", "summary"});
+      Require(replay_ != nullptr, "recording not started");
+      replay_->Snapshot(request);
+      return {{"ok", true}};
+    }
+    if (op == "record_close") {
+      Keys(request, {"op", "summary"});
+      Require(replay_ != nullptr, "recording not started");
+      replay_->Close(request.at("summary"));
+      replay_.reset();
+      return {{"ok", true}};
+    }
     if (op == "reset") {
       Keys(request, {"op", "round_id"});
       round_ = request.at("round_id");
@@ -130,7 +151,12 @@ class Bridge {
     if (op == "begin_training") {
       Keys(request, {"op", "round_id", "start_ns", "policy_mode"});
       const std::string mode = request.value("policy_mode", "fire_only");
+#ifdef RM_RULE_COMPARISON
+      Require(mode == "fire_only" || mode == "nine" || mode == "rule",
+              "invalid training policy mode");
+#else
       Require(mode == "fire_only" || mode == "nine", "invalid training policy mode");
+#endif
       Require(!pending_ && last_tick_ && !evaluation_window_ && !training_,
               "training requires an acknowledged warmup");
       Require(request.at("round_id").get<std::uint64_t>() == round_ &&
@@ -160,6 +186,8 @@ class Bridge {
       Keys(request, {"op", "success"});
       Require(pending_.has_value(), "no pending publication");
       control_->AcknowledgePublication(*pending_, request.at("success"), Time(*last_tick_));
+      if (replay_)
+        replay_->Control(*pending_);
       pending_.reset();
       return {{"ok", true}};
     }
@@ -167,7 +195,12 @@ class Bridge {
     const bool external = op == "step_policy";
     Require(external == ((training_ || evaluation_window_.has_value()) && policy_mode_ != "rule"),
             "step operation does not match evaluation policy mode");
+#ifdef RM_RULE_COMPARISON
+    Keys(request, {"op", "round_id", "sim_time_ns", "visual_frames", "feedback", "self_referee",
+                   "decision_due"});
+#else
     Keys(request, {"op", "round_id", "sim_time_ns", "visual_frames", "feedback", "self_referee"});
+#endif
     Require(!pending_, "ack previous publication first");
     Require(request.at("round_id").get<std::uint64_t>() == round_, "old round input");
     const auto now = request.at("sim_time_ns").get<std::uint64_t>();
@@ -233,6 +266,7 @@ class Bridge {
       const auto pnp = pnp_->ProcessFrame(sequence, camera, detections, refinements);
       auto prediction =
           predictor_->ProcessFrame(stamp, spatial, detections, refinements, pnp.output, {});
+      track_reset_count_ = prediction.diagnostics.reset_count;
       if (!seen_generation_ || *seen_generation_ != prediction.output.track_generation) {
         seen_at_ = {};
         detected_.fill(false);
@@ -244,6 +278,23 @@ class Bridge {
           seen_at_[association.slot] = capture;
           detected_[association.slot] = true;
         }
+      }
+      if (replay_) {
+        tool::foxglove::pipeline::VisionDebugFrame debug;
+        debug.packet.capture.stamp = stamp;
+        debug.packet.camera_model = camera;
+        frame::FrameKinematics kinematics;
+        kinematics.world_t_gimbal = input_.world_t_gimbal;
+        kinematics.gimbal_t_camera_optical = input_.gimbal_t_camera_optical;
+        kinematics.gimbal_t_muzzle = input_.gimbal_t_muzzle;
+        debug.packet.kinematics = kinematics;
+        debug.output.detections = detections;
+        debug.output.refinements = refinements;
+        debug.output.pnp = pnp.output;
+        debug.output.prediction = prediction.output;
+        debug.diagnostics.pnp = pnp.diagnostics;
+        debug.diagnostics.prediction = prediction.diagnostics;
+        replay_->Frame(std::move(debug));
       }
       input_.prediction = std::move(prediction.output);
       Json poses = Json::array();
@@ -279,6 +330,15 @@ class Bridge {
     Require(input_.referee.sample_time_ns <= now, "future referee sample");
     input_.referee.age_at_receive_s =
         static_cast<double>(now - input_.referee.sample_time_ns) * 1e-9;
+#ifdef RM_RULE_COMPARISON
+    if (request.contains("decision_due")) {
+      Require(!external && training_ && policy_mode_ == "rule" &&
+                  request.at("decision_due").is_boolean(),
+              "clock gate is comparison-only");
+      input_.referee.fire_permitted =
+          input_.referee.fire_permitted && request.at("decision_due").get<bool>();
+    }
+#endif
     input_.external_control_enabled = true;
     const auto feedback = Feedback(request.at("feedback"));
     Json policy_record = nullptr;
@@ -296,6 +356,7 @@ class Bridge {
             policy_record = {{"observation", WireObservation(observation, now)},
                              {"metadata",
                               {{"track_generation", snapshot.prediction.track_generation},
+                               {"track_reset_count", track_reset_count_},
                                {"source_sequence", snapshot.prediction.sequence}}}};
             // 在当前回调内暂停，恢复时不再次调用 Step，避免重复融合或求解 MPC。
             std::cout << Json({{"ok", true},
@@ -380,6 +441,7 @@ class Bridge {
           {"selected_slot", output.selected_slot},
           {"slot_switched", pending_->diagnostics.armor_selection.switched},
           {"track_generation", input_.prediction.track_generation},
+          {"track_reset_count", track_reset_count_},
           {"reject_reason", static_cast<int>(output.reject_reason)}}},
         {"command",
          {{"valid", output.command.valid},
@@ -387,6 +449,9 @@ class Bridge {
           {"yaw_rad", output.command.yaw},
           {"pitch_rad", output.command.pitch},
           {"distance_m", output.command.valid ? output.command.target_distance_m : 0.0}}}};
+    response["control"]["shot_requested"] = output.shot_requested;
+    response["control"]["shot_accepted"] = output.shot_accepted;
+    response["control"]["reject_reason_name"] = modules::FireRejectReasonName(output.reject_reason);
     if (external) {
       response["policy"] = policy_record;
       response["control"]["shot_requested"] = output.shot_requested;
@@ -464,6 +529,8 @@ class Bridge {
   bool training_{false};
   std::string policy_mode_{"rule"};
   std::uint64_t policy_token_{0};
+  std::uint64_t track_reset_count_{0};
+  std::unique_ptr<rmvision_rl::ReplayDiagnostics> replay_;
   std::unique_ptr<modules::FireOnlyPolicyAdapter> fire_only_;
   std::unique_ptr<modules::ArmorPnp> pnp_;
   std::unique_ptr<modules::ArmorPredictor> predictor_;
@@ -488,7 +555,7 @@ int main(int argc, char** argv) {
     Bridge bridge(argv[1], argc == 4 ? &diagnostics : nullptr);
     std::string line;
     while (std::getline(std::cin, line)) {
-      if (line.size() > 1024 * 1024)
+      if (line.size() > 16 * 1024 * 1024)
         throw std::runtime_error("bridge input too large");
       try {
         std::cout << bridge.Handle(Json::parse(line)).dump() << std::endl;

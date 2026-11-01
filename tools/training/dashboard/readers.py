@@ -90,6 +90,19 @@ def list_runs(training_root: Path) -> list[dict[str, Any]]:
     """List run directories without assuming every directory is complete."""
     if not training_root.is_dir():
         return []
-    runs = [run_summary(path) for path in training_root.iterdir() if path.is_dir()
-            and path.name != ".web-jobs" and (path / "run.json").is_file()]
+    runs = []
+    for path in training_root.iterdir():
+        if not path.is_dir() or path.name == ".web-jobs":
+            continue
+        if (path / "run.json").is_file():
+            runs.append(run_summary(path))
+            continue
+        # Sequential curricula keep each role below one immutable run group.
+        # A flat logical ID preserves the existing HTTP routes and downloads.
+        for role in ("infantry", "sentry"):
+            child = path / role
+            if child.resolve().is_relative_to(training_root.resolve()) and (child / "run.json").is_file():
+                summary = run_summary(child)
+                summary.update(run_id=f"{path.name}::{role}",run_group=path.name,run_role=role)
+                runs.append(summary)
     return sorted(runs, key=lambda item: item["run_id"], reverse=True)

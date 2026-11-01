@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="830" viewBox="0 0 1200 830" role="img" aria-labelledby="title desc">
+<title id="title">GRU 记忆的重置、保留与置换</title><desc id="desc">规则按每个环境独立执行；“清零”在该真实控制步的 GRU 更新之前发生。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#61758a"/></marker></defs>
+<style>text{font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;fill:#25394c} .edge{fill:none;stroke:#61758a;stroke-width:2;marker-end:url(#arrow)} .label{font-size:16px;paint-order:stroke;stroke:white;stroke-width:7;stroke-linejoin:round}</style>
+<rect width="1200" height="830" fill="white"/>
+<text x="35" y="40" font-size="25" text-anchor="start" font-weight="600">GRU 记忆的重置、保留与置换</text>
+<text x="35" y="72" font-size="16" text-anchor="start">规则按每个环境独立执行；“清零”在该真实控制步的 GRU 更新之前发生。</text>
+<path class="edge" d="M420,149 L510,149"/>
+<path class="edge" d="M420,244 L510,244"/>
+<path class="edge" d="M420,339 L510,339"/>
+<path class="edge" d="M420,434 L510,434"/>
+<path class="edge" d="M420,529 L510,529"/>
+<path class="edge" d="M420,624 L510,624"/>
+<rect x="35" y="115" width="385" height="68" rx="10" fill="#fff4e5" stroke="#b67a28" stroke-width="1.5"/>
+<text x="227.5" y="155.0" font-size="18" text-anchor="middle" font-weight="600">新回合 episode_start</text>
+<rect x="510" y="115" width="650" height="68" rx="10" fill="#fff4e5" stroke="#b67a28" stroke-width="1.5"/>
+<text x="835.0" y="155.0" font-size="18" text-anchor="middle" font-weight="600">目标 / 候选 / 云台 / 资源 / Critic 全部清零</text>
+<rect x="35" y="210" width="385" height="68" rx="10" fill="#fff4e5" stroke="#b67a28" stroke-width="1.5"/>
+<text x="227.5" y="250.0" font-size="18" text-anchor="middle" font-weight="600">新代次 / tracker reset / 首次进入 LOST</text>
+<rect x="510" y="210" width="650" height="68" rx="10" fill="#fff4e5" stroke="#b67a28" stroke-width="1.5"/>
+<text x="835.0" y="250.0" font-size="18" text-anchor="middle" font-weight="600">目标与候选清零；云台 / 资源 / Critic 保留后更新</text>
+<rect x="35" y="305" width="385" height="68" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="227.5" y="345.0" font-size="18" text-anchor="middle" font-weight="600">短暂遮挡，仍未进入 LOST</text>
+<rect x="510" y="305" width="650" height="68" rx="10" fill="#eaf5f0" stroke="#3d8066" stroke-width="1.5"/>
+<text x="835.0" y="345.0" font-size="18" text-anchor="middle" font-weight="600">全部状态继续更新；是否可开火由掩码决定</text>
+<rect x="35" y="400" width="385" height="68" rx="10" fill="#eef5ff" stroke="#4475ad" stroke-width="1.5"/>
+<text x="227.5" y="440.0" font-size="18" text-anchor="middle" font-weight="600">可信 candidate_map 重排</text>
+<rect x="510" y="400" width="650" height="68" rx="10" fill="#eef5ff" stroke="#4475ad" stroke-width="1.5"/>
+<text x="835.0" y="440.0" font-size="18" text-anchor="middle" font-weight="600">候选记忆按新槽位 → 旧槽位置换；其余状态保留后更新</text>
+<rect x="35" y="495" width="385" height="68" rx="10" fill="#fff4e5" stroke="#b67a28" stroke-width="1.5"/>
+<text x="227.5" y="535.0" font-size="18" text-anchor="middle" font-weight="600">candidate_map 无效</text>
+<rect x="510" y="495" width="650" height="68" rx="10" fill="#fff4e5" stroke="#b67a28" stroke-width="1.5"/>
+<text x="835.0" y="535.0" font-size="18" text-anchor="middle" font-weight="600">目标与候选清零，清本地返回槽位；其余状态保留后更新</text>
+<rect x="35" y="590" width="385" height="68" rx="10" fill="#f3f5f8" stroke="#748296" stroke-width="1.5"/>
+<text x="227.5" y="630.0" font-size="18" text-anchor="middle" font-weight="600">序列填充 active = false</text>
+<rect x="510" y="590" width="650" height="68" rx="10" fill="#f3f5f8" stroke="#748296" stroke-width="1.5"/>
+<text x="835.0" y="630.0" font-size="18" text-anchor="middle" font-weight="600">所有状态保持原值：不清零、不置换、不推进</text>
+<text x="35" y="730" font-size="16" text-anchor="start">Actor 状态：target [B,128]；candidates [B,4,64]；gimbal / resources 各 [B,64]。</text>
+<text x="35" y="760" font-size="16" text-anchor="start">Critic 独立保存 [B,128]；target_reset 不清 Critic。candidate_map 不使用仿真真实装甲 ID。</text>
+<text x="35" y="790" font-size="16" text-anchor="start">回合首步 dt_s = 0；后续真实控制步推进记忆。部署换权重只在下一回合首步发生。</text>
+</svg>

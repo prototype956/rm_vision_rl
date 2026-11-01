@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 import copy
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -10,7 +11,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
-from src.environment.warmup import STEP_NS, WarmupConfig, WarmupSession
+from src.environment.warmup import STEP_NS, WarmupConfig, WarmupSession, TrackingInitializationTimeout
 from src.policy.observations import HISTORY
 from src.policy.decision import make_policy
 from src.environment.spawn import reset_spawn
@@ -70,7 +71,7 @@ class FireEnv(gym.Env):
             "valid": spaces.MultiBinary(HISTORY),
             "action_mask": spaces.MultiBinary(int(self.action_space.n)),
         })
-        if observation_mode == "asymmetric_v1":
+        if observation_mode in ("asymmetric_v1", "asymmetric_gru_v1"):
             from src.policy.privileged import FEATURE_COUNT
             self.observation_space.spaces["privileged"] = spaces.Box(-1.,1.,(FEATURE_COUNT,),np.float32)
         if selection_memory:
@@ -78,13 +79,25 @@ class FireEnv(gym.Env):
         if self._history.clock.enabled:
             self.observation_space.spaces["decision_clock"] = spaces.Box(
                 np.zeros(5, dtype=np.float32), np.array([1, 60, 60, 60, 60], dtype=np.float32))
+        if observation_mode == "asymmetric_gru_v1":
+            self.observation_space.spaces.update({
+                "features": spaces.Box(-1, 1, shape=(self._history.feature_count,), dtype=np.float32),
+                "valid": spaces.MultiBinary(1),
+                "dt_s": spaces.Box(0, np.inf, shape=(1,), dtype=np.float32),
+                "episode_start": spaces.MultiBinary(1),
+                "target_reset": spaces.MultiBinary(1),
+                "candidate_map": spaces.MultiDiscrete([4] * 4),
+                "decision_clock": spaces.Box(-np.inf, np.inf, shape=(5,), dtype=np.float32),
+            })
         self._stack = None
+        self.detailed_logging = True
         self._clock_log = None
         self._scene_log = None
         self._action_log = None
         self._client = self._bridge = None
         self._prepared = self._response = self._obs = None
         self._status = "idle"
+        self.replay_recording = None  # Explicit evaluation only: (path, identity).
 
     def _start(self):
         if self._stack is not None:
@@ -96,15 +109,18 @@ class FireEnv(gym.Env):
         self._output = Path(tempfile.mkdtemp(prefix="env-", dir=self.log_dir))
         self._stack = ExitStack()
         self._scene_log = self._stack.enter_context((self._output / "scenes.jsonl").open("w"))
-        self._action_log = self._stack.enter_context((self._output / "actions.jsonl").open("w"))
+        self._action_log = self._stack.enter_context(((self._output / "actions.jsonl") if self.detailed_logging else Path(os.devnull)).open("w"))
         if self._history.clock.enabled:
-            self._clock_log = self._stack.enter_context((self._output / "decision-clock.jsonl").open("w"))
+            self._clock_log = self._stack.enter_context(((self._output / "decision-clock.jsonl") if self.detailed_logging else Path(os.devnull)).open("w"))
         self._client = self._stack.enter_context(training_worker(
             self.simulator_root, self.simulator_binary, self._output / "simulator.log",
             self.simulator_config))
         self._bridge = self._stack.enter_context(vision_worker(
             self.bridge_binary, self.vision_root, self._output / "bridge",
             observation_mode=self.observation_mode))
+        self._bridge.collect_events = getattr(self, "collect_replay_events", False)
+        if self.replay_recording is not None:
+            self._bridge.start_recording(*self.replay_recording)
 
     def _fail(self):
         """携带原异常退出工作进程上下文，保留原错误供调用方处理。"""
@@ -172,7 +188,8 @@ class FireEnv(gym.Env):
             self._start()
             self._bridge.cancel()
             warmup = WarmupSession(self._client, self._bridge, self.warmup_config)
-            reset_spawn(warmup.reset, spawn_rng, scenario, self._reset_attempts)
+            reset_spawn(warmup.reset, spawn_rng, scenario, self._reset_attempts,
+                        max_attempts=getattr(self, "_spawn_attempts", 32))
             self._scene_info = {
                 **self._scene_sample, "spawn_seed": self._reset_attempts[-1]["seed"],
                 "scenario": copy.deepcopy(warmup.response["data"]["evaluation"]["scenario"]),
@@ -183,14 +200,29 @@ class FireEnv(gym.Env):
             while warmup.status == "warming":
                 warmup.advance()
             if warmup.status != "ready":
-                raise TimeoutError(f"fire-target warmup timed out: {warmup.info()}")
+                raise TrackingInitializationTimeout(warmup.info())
+            minimum = scenario.get("policy_start", {}).get("minimum_warmup_ms", 0)*1_000_000
+            while warmup.response["sim_time_ns"] < minimum:
+                before = warmup.response
+                result = warmup.advance_tracking()
+                ready = warmup.confirmation.observe(before["sim_time_ns"], before["data"]["feedback"], result["vision"])
+                if warmup.response["sim_time_ns"] >= self.warmup_config.timeout_ms*1_000_000:
+                    raise TrackingInitializationTimeout(warmup.info(), phase="policy_start")
+                if not ready and warmup.response["sim_time_ns"] >= minimum:
+                    minimum += 10_000_000
+            if minimum:
+                warmup.evaluation_start_ns = warmup.response["sim_time_ns"]
             self._response = warmup.response
+            if "policy_start" in scenario:
+                self._response = self._client.begin_policy()
             self._start_ns = self._response["sim_time_ns"]
             self._warmup_info = warmup.info()
             # 进程内通信计数器不能作为可复现的回合信息。
             self._warmup_info.pop("round_id")
             self._bridge.begin_training(self._response["round_id"], self._start_ns,
                                         policy_mode=self._history.bridge_mode)
+            if self.replay_recording is not None:
+                self._bridge.record_phase = "evaluating"
             self._history.clock.start_episode()
             self._prepare()
             self._status = "ready"
@@ -203,15 +235,18 @@ class FireEnv(gym.Env):
     def _prepare(self):
         self._prepared = self._bridge.prepare(self._response)
         self._history.begin_step()
+        if self.observation_mode == "asymmetric_gru_v1":
+            self._history.set_tracking_metadata(self._prepared.get("metadata", self._prepared.get("control", {})))
         if self._prepared.get("kind") == "policy_observation":
-            self._history.set_generation(self._prepared["metadata"]["track_generation"])
+            if self.observation_mode != "asymmetric_gru_v1":
+                self._history.set_generation(self._prepared["metadata"]["track_generation"])
             if self.observation_mode == "legacy":
                 self._history(self._prepared["observation"])
         else:
             # 跳过策略回调的周期仍占用一行历史，并推进一个物理步。
             if self._prepared["command"]["fire"]:
                 raise RuntimeError("a skipped policy callback must not issue fire")
-        if self.observation_mode == "asymmetric_v1":
+        if self.observation_mode in ("asymmetric_v1", "asymmetric_gru_v1"):
             from src.policy.asymmetric_observations import adapt_observation
             raw = self._prepared.get("observation")
             self._actor_semantic = adapt_observation(raw, self._response["data"]["actor_feedback"],
@@ -222,7 +257,7 @@ class FireEnv(gym.Env):
             self._history.mask[list(self._history.fire_actions)] = False
             self._history.physical_fire_action = None
         self._obs = self._history.observation()
-        if self.observation_mode == "asymmetric_v1":
+        if self.observation_mode in ("asymmetric_v1", "asymmetric_gru_v1"):
             from src.policy.privileged import encode
             self._obs["privileged"] = encode(self._response["data"]["privileged_state"],
                                               self._response["sim_time_ns"])
@@ -271,6 +306,11 @@ class FireEnv(gym.Env):
                 "reset_attempts": copy.deepcopy(self._reset_attempts),
                 "warmup": copy.deepcopy(self._warmup_info),
                 "scene": copy.deepcopy(self._scene_info)}
+        resources = own["resources"]
+        if "ordinary_heat_lock_count" in resources:
+            result["physical_thermal"] = dict(ordinary_lock_count=resources["ordinary_heat_lock_count"],
+                round_lock_count=resources["round_heat_lock_count"], joint_lock_count=resources["joint_heat_lock_count"],
+                locked_s=own["heat_locked_s"])
         if self._history.clock.enabled:
             result["decision_clock"] = self._history.clock.info()
             result["physical_fire_legal_next"] = self._history.physical_fire_action is not None
@@ -326,6 +366,8 @@ class FireEnv(gym.Env):
             result = (self._bridge.submit(wire_action)
                       if self._prepared.get("kind") == "policy_observation" else self._prepared)
             before = self._response["sim_time_ns"]
+            if getattr(self, "collect_replay_events", False):
+                self._last_replay_command = dict(result["command"])
             self._response = self._client.advance(**result["command"])
             self._bridge.ack(True)
             if self._response["sim_time_ns"] != before + STEP_NS:

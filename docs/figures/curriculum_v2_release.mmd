@@ -1,0 +1,20 @@
+flowchart TB
+  pre["preflight：固定验证 / 测试场景<br/>保留准入失败与种子，不按战斗成绩换场景"]:::check
+  qual["benchmark：两类角色各完成至少两次更新<br/>128 环境，检查恢复计数与 Actor 导出"]:::check
+  gate["长期流水线核查回归与放行文件<br/>缺测 / 物理 / 规则诊断；源码身份与测试"]:::check
+  freeze["冻结源码、配置、二进制、资产与 Python 环境<br/>记录哈希与运行目录，从冻结副本启动"]:::check
+  train["正式训练：步兵 → 哨兵，各自从零开始<br/>每角色累计十亿步；每次更新后验证 / 复核"]:::train
+  final["独立最终测试、Actor 导出与一致性核对<br/>分别报告：预算完成 / 战斗门槛 / 热锁门槛"]:::check
+  blocked["核查失败<br/>保留失败与诊断产物<br/>阻止正式启动"]:::stop
+  pre --> qual
+  qual --> gate
+  gate --> freeze
+  freeze --> train
+  train --> final
+  gate -->|"失败"| blocked
+  classDef control fill:#eef5ff,stroke:#4475ad,color:#25394c
+  classDef train fill:#f0ecfa,stroke:#8465ac,color:#25394c
+  classDef check fill:#eaf5f0,stroke:#3d8066,color:#25394c
+  classDef warn fill:#fff4e5,stroke:#b67a28,color:#25394c
+  classDef stop fill:#fbeeee,stroke:#ad5454,color:#25394c
+  classDef neutral fill:#f3f5f8,stroke:#748296,color:#25394c

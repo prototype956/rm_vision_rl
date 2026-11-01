@@ -83,16 +83,16 @@ def _log_update(model, completed_updates, start_steps, started):
 
 def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, seed=None,
                  device=None, n_envs=None):
-    """按完整采样批次训练；恢复时的预算表示新增步数。
+    """按完整采样批次训练；课程恢复保留累计目标，旧非课程恢复使用新增预算。
 
     Args:
         config: 新训练使用的配置；恢复训练时使用检查点内的配置。
         resume: 待恢复的检查点路径，与 config 和 seed 互斥。
         output_dir: 新运行目录，必须尚不存在。
-        timesteps: 本次新增采样步数，向上取整到完整 rollout。
+        timesteps: 新训练的采样目标；课程恢复不得改变原累计目标，旧非课程恢复为新增步数。
         seed: 新模型的随机种子，不影响场景种子。
         device: 覆盖配置中的 PyTorch 计算设备。
-        n_envs: 覆盖独立环境数量，恢复时也允许；不改变每环境 n_steps。
+        n_envs: 新训练可覆盖环境数；课程恢复须保持原值，不改变每环境 n_steps。
 
     Returns:
         本次运行的输出目录，包含日志和完整更新后保存的模型。
@@ -115,6 +115,12 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
     if n_envs is not None:
         config["n_envs"] = n_envs
     config = validate_config(config)
+    if previous and "curriculum" in config:
+        if any(config[k] != previous["config"][k] for k in ("n_envs", "total_timesteps", "curriculum")):
+            raise ValueError("curriculum resume retains cumulative budget, worker count and curriculum; start a new experiment to change them")
+    if config["policy_kind"] == "asymmetric_gru":
+        from src.training.recurrent_ppo import run_recurrent_training
+        return run_recurrent_training(config, resume=resume, output_dir=output_dir)
     # 显式请求 CUDA 时应检查可用性，避免静默退回 CPU。
     requested_device = torch.device(config["device"])
     if requested_device.type == "cuda" and not torch.cuda.is_available():
@@ -204,14 +210,14 @@ def run_training(config=None, *, resume=None, output_dir=None, timesteps=None, s
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train a fire-control MaskablePPO/MLP policy")
+    parser = argparse.ArgumentParser(description="Train masked PPO with MLP or persistent asymmetric GRU")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--config", type=Path, help=f"JSON config (default: {DEFAULT_CONFIG})")
     source.add_argument("--resume", type=Path, help="checkpoint ZIP; continue from a fresh simulator episode")
-    parser.add_argument("--timesteps", type=int, help="additional samples, rounded up to complete rollouts")
+    parser.add_argument("--timesteps", type=int, help="new-run sample budget; curriculum resume retains its saved cumulative target")
     parser.add_argument("--seed", type=int, help="new model RNG seed; does not change the scene seed")
-    parser.add_argument("--device", help="PyTorch device, defaults to config (cpu)")
-    parser.add_argument("--n-envs", type=int, help="independent sampling environments (default: saved config or 1)")
+    parser.add_argument("--device", help="PyTorch device, defaults to the selected configuration")
+    parser.add_argument("--n-envs", type=int, help="sampling environments (default: preset/checkpoint); curriculum resume retains its worker count")
     parser.add_argument("--output-dir", type=Path, help="new run directory; must not already exist")
     args = parser.parse_args()
     if args.resume and args.seed is not None:

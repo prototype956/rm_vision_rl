@@ -112,7 +112,21 @@
       await submitTool('benchmark', body, 'benchmark');
     } catch (error) { showMessage(error.message, true, 'tools-message'); }
   }
-  async function submitView(event) { event.preventDefault(); try { await submitTool('view', { checkpoint: $('view-checkpoint').value, scene_count: Number($('view-scene-count').value), scene_seeds: commaNumbers('view-seeds'), workers: Number($('view-workers').value), device: $('view-device').value || undefined }, 'view'); } catch (error) { showMessage(error.message, true, 'tools-message'); } }
+  async function submitView(event) {
+    event.preventDefault();
+    try {
+      const mode = $('view-source').value;
+      const mcap = $('view-mcap').checked || mode === 'actor';
+      const body = { mode, checkpoint: mode === 'checkpoint' ? $('view-checkpoint').value : undefined,
+        actor: mode === 'actor' ? $('view-actor').value : undefined, record_mcap: mcap, combat_hud: $('view-combat-hud').checked,
+        scene_count: mcap ? 1 : Number($('view-scene-count').value),
+        scene_seeds: mcap ? [] : commaNumbers('view-seeds'), workers: Number($('view-workers').value),
+        device: $('view-device').value || undefined };
+      if (mcap) Object.assign(body, { scenarios: $('view-scenarios').value, split: $('view-split').value,
+        course: Number($('view-course').value), cases: commaNumbers('view-cases') });
+      await submitTool('view', body, 'view');
+    } catch (error) { showMessage(error.message, true, 'tools-message'); }
+  }
   async function submitManual(event) {
     event.preventDefault();
     const checkpoint = $('manual-checkpoint').value;

@@ -1,4 +1,4 @@
-"""读取和校验 MLP 训练配置，与 Gym 环境及通信配置分开管理。"""
+"""读取和校验 MLP/GRU 训练配置，与 Gym 环境及通信配置分开管理。"""
 import copy
 import json
 import math
@@ -8,7 +8,7 @@ from src.environment.rotation_fire import rotation_scenario, validate_speed_rang
 from src.environment.multi_robot_fire import multi_robot_scenario
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = ROOT / "config/training/rotation_joint_shared_score_ppo.json"
+DEFAULT_CONFIG = ROOT / "config/training/rmul_2027_infantry_curriculum_v2.json"
 ENV_PATHS = ("simulator_root", "vision_root", "simulator_binary", "bridge_binary", "simulator_config")
 
 
@@ -18,16 +18,24 @@ def validate_config(value):
     required = {"version", "algorithm", "policy_kind", "seed", "device", "torch_threads",
                 "total_timesteps", "checkpoint_updates", "environment", "ppo"}
     if (not isinstance(config, dict) or not required <= config.keys()
-            or set(config) - required - {"n_envs", "reward_scale", "switch_penalty", "selection_reward"}):
+            or set(config) - required - {"n_envs", "reward_scale", "switch_penalty", "selection_reward", "curriculum", "thermal_reward", "runtime"}):
         raise ValueError(f"training config requires {sorted(required)}; optional: n_envs, reward_scale, switch_penalty")
     config.setdefault("n_envs", 1)
     config.setdefault("reward_scale", 1.0)
     scale = config["reward_scale"]
     if type(scale) not in (int, float) or not math.isfinite(scale) or scale <= 0:
         raise ValueError("reward_scale must be finite and positive")
-    if (config["version"] != 1 or config["algorithm"] != "maskable_ppo"
-            or config["policy_kind"] not in ("mlp", "factorized_mlp", "shared_score_mlp", "asymmetric_mlp")):
-        raise ValueError("only version 1 maskable_ppo with mlp/factorized_mlp/shared_score_mlp is implemented")
+    if "thermal_reward" in config:
+        from src.training.thermal_reward import validate
+        config["thermal_reward"] = validate(config["thermal_reward"])
+    if "runtime" in config:
+        from src.training.runtime import validate
+        config["runtime"] = validate(config["runtime"])
+    recurrent = config["policy_kind"] == "asymmetric_gru"
+    algorithm = "recurrent_maskable_ppo" if recurrent else "maskable_ppo"
+    if (config["version"] != 1 or config["algorithm"] != algorithm or config["policy_kind"] not in
+            ("mlp", "factorized_mlp", "shared_score_mlp", "asymmetric_mlp", "asymmetric_gru")):
+        raise ValueError("unsupported algorithm/policy combination")
 
     def integer(name, number, minimum=1):
         if type(number) is not int or number < minimum:
@@ -51,13 +59,22 @@ def validate_config(value):
         raise ValueError("environment.scenario must be an object")
     if env.get("action_mode", "fire_only") not in ("fire_only", "joint"):
         raise ValueError("environment.action_mode must be fire_only or joint")
-    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp", "asymmetric_mlp") and env.get("action_mode") != "joint":
+    if config["policy_kind"] in ("factorized_mlp", "shared_score_mlp", "asymmetric_mlp", "asymmetric_gru") and env.get("action_mode") != "joint":
         raise ValueError(f"{config['policy_kind']} requires joint action mode")
     mode = env.get("observation_mode", "legacy")
-    if mode not in ("legacy", "asymmetric_v1"):
+    if mode not in ("legacy", "asymmetric_v1", "asymmetric_gru_v1"):
         raise ValueError("unsupported observation_mode")
     if (mode == "asymmetric_v1") != (config["policy_kind"] == "asymmetric_mlp"):
         raise ValueError("asymmetric_v1 observations require asymmetric_mlp policy, and vice versa")
+    if (mode == "asymmetric_gru_v1") != recurrent:
+        raise ValueError("asymmetric_gru requires v5 single-step observations")
+    if "curriculum" in config:
+        from src.training.curriculum import implementation
+        config["curriculum"] = implementation(config["curriculum"]).validate(config["curriculum"])
+        if not recurrent or env.get("task") != "multi_robot_fire":
+            raise ValueError("curriculum requires asymmetric_gru multi_robot_fire")
+    if recurrent and not env.get("selection_memory", False):
+        raise ValueError("asymmetric_gru requires selection_memory")
     if "selection_memory" in env and type(env["selection_memory"]) is not bool:
         raise ValueError("selection_memory must be boolean")
     if env.get("selection_memory", False) and env.get("action_mode") != "joint":
@@ -111,14 +128,16 @@ def validate_config(value):
     ppo = config["ppo"]
     fields = {"n_steps", "batch_size", "n_epochs", "learning_rate", "gamma", "gae_lambda",
               "clip_range", "ent_coef", "vf_coef", "max_grad_norm", "net_arch"}
+    if recurrent:
+        fields = fields - {"net_arch"} | {"sequence_length", "burn_in", "target_kl"}
     if not isinstance(ppo, dict) or set(ppo) != fields:
         raise ValueError(f"ppo requires exactly: {sorted(fields)}")
     for name in ("n_steps", "batch_size", "n_epochs"):
         integer(name, ppo[name], 2 if name != "n_epochs" else 1)
     rollout_size = ppo["n_steps"] * config["n_envs"]
-    if ppo["batch_size"] > rollout_size or rollout_size % ppo["batch_size"]:
+    if not recurrent and (ppo["batch_size"] > rollout_size or rollout_size % ppo["batch_size"]):
         raise ValueError("batch_size must divide n_steps * n_envs")
-    for name in fields - {"n_steps", "batch_size", "n_epochs", "net_arch"}:
+    for name in fields - {"n_steps", "batch_size", "n_epochs", "net_arch", "sequence_length", "burn_in"}:
         number = ppo[name]
         if type(number) not in (int, float) or not math.isfinite(number) or number < 0:
             raise ValueError(f"{name} must be finite and nonnegative")
@@ -127,6 +146,12 @@ def validate_config(value):
             raise ValueError(f"{name} must be positive")
     if not 0 < ppo["gamma"] <= 1 or not 0 <= ppo["gae_lambda"] <= 1:
         raise ValueError("gamma must be in (0,1] and gae_lambda in [0,1]")
+    if recurrent:
+        integer("sequence_length", ppo["sequence_length"])
+        integer("burn_in", ppo["burn_in"], 0)
+        if ppo["target_kl"] <= 0:
+            raise ValueError("target_kl must be positive")
+        return config
     if not isinstance(ppo["net_arch"], dict) or set(ppo["net_arch"]) != {"pi", "vf"}:
         raise ValueError("net_arch requires pi and vf layer lists")
     for layers in ppo["net_arch"].values():

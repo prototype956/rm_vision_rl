@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "algorithm": "maskable_ppo",
-  "policy_kind": "asymmetric_mlp",
+  "algorithm": "recurrent_maskable_ppo",
+  "policy_kind": "asymmetric_gru",
   "seed": 17,
-  "device": "cpu",
+  "device": "cuda:0",
   "torch_threads": 1,
-  "total_timesteps": 1024,
-  "checkpoint_updates": 4,
+  "total_timesteps": 1000000000,
+  "checkpoint_updates": 1,
   "environment": {
     "episode_steps": 3000,
     "scene_seed": 17,
@@ -19,7 +19,8 @@
     "scenario": {
       "duel": {
         "controlled": {
-          "preset": "infantry_health_cooling"
+          "preset": "infantry_health_cooling",
+          "profile": "standard"
         },
         "target": {}
       },
@@ -33,11 +34,11 @@
     "task": "multi_robot_fire",
     "action_mode": "joint",
     "selection_memory": true,
-    "observation_mode": "asymmetric_v1"
+    "observation_mode": "asymmetric_gru_v1"
   },
   "ppo": {
-    "n_steps": 1024,
-    "batch_size": 256,
+    "n_steps": 512,
+    "batch_size": 64,
     "n_epochs": 10,
     "learning_rate": 0.0003,
     "gamma": 0.999,
@@ -46,24 +47,26 @@
     "ent_coef": 0.01,
     "vf_coef": 0.5,
     "max_grad_norm": 0.5,
-    "net_arch": {
-      "pi": [
-        128,
-        128
-      ],
-      "vf": [
-        128,
-        128
-      ]
-    }
+    "sequence_length": 128,
+    "burn_in": 32,
+    "target_kl": 0.03
   },
   "reward_scale": 0.05,
-  "n_envs": 1,
+  "n_envs": 128,
   "selection_reward": {
     "switch_cost": 0.002,
     "return_cost": 0.03,
     "return_window_s": 0.1,
     "facing_rate_per_s": 0.1,
     "facing_margin": 0.1
-  }
+  },
+  "curriculum": {
+    "version": 2
+  },
+  "thermal_reward": {
+    "ordinary_onset": 2.0,
+    "round_onset": 10.0,
+    "locked_per_s": 0.2
+  },
+  "runtime": {}
 }

@@ -110,6 +110,11 @@ class JointFirePolicy(DecisionPolicy):
 
 def make_policy(action_mode='fire_only', actor=None, *, decision_clock=None, selection_memory=False,
                 observation_mode="legacy"):
+    if observation_mode == "asymmetric_gru_v1":
+        if action_mode != "joint" or not selection_memory:
+            raise ValueError("GRU requires joint actions and selection memory")
+        from src.policy.recurrent_observations import RecurrentObservationPolicy
+        return RecurrentObservationPolicy(actor, decision_clock=decision_clock)
     if observation_mode not in ("legacy", "asymmetric_v1"):
         raise ValueError("unsupported observation mode")
     if observation_mode == "asymmetric_v1" and action_mode != "joint":

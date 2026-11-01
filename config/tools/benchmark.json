@@ -1,7 +1,11 @@
 {
-  "config": "config/training/rotation_joint_shared_score_ppo.json",
+  "config": "config/training/rmul_2027_infantry_curriculum_v2.json",
   "output_dir": "artifacts/performance",
-  "n_envs": [1, 2, 4],
+  "n_envs": [
+    1,
+    2,
+    4
+  ],
   "repeats": 2,
   "rollout_mode": "total",
   "timesteps": 2048,

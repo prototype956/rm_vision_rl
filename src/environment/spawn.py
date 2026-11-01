@@ -1,7 +1,7 @@
 """为 Gym 和检查点评估提供一致、可复现的出生几何重试。"""
 
 
-def reset_spawn(reset, rng, scenario, attempts):
+def reset_spawn(reset, rng, scenario, attempts, *, max_attempts=32):
     """为非法出生几何最多尝试 32 个派生种子，其他运行错误直接上抛。
 
     Args:
@@ -13,7 +13,7 @@ def reset_spawn(reset, rng, scenario, attempts):
     Returns:
         首次成功的重置结果。
     """
-    for _ in range(32):
+    for _ in range(max_attempts):
         seed = int(rng.integers(0, 2**63))
         attempt = {"seed": seed}
         attempts.append(attempt)
@@ -23,4 +23,6 @@ def reset_spawn(reset, rng, scenario, attempts):
             if not str(error).startswith("invalid seed "):
                 raise
             attempt["error"] = str(error)
-    raise RuntimeError(f"no legal spawn in 32 attempts: {attempts}")
+            if max_attempts == 1:
+                raise
+    raise RuntimeError(f"no legal spawn in {max_attempts} attempts: {attempts}")

@@ -401,6 +401,13 @@ def main():
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--checkpoint", type=Path)
     source.add_argument("--replay", type=Path)
+    source.add_argument("--actor", type=Path)
+    parser.add_argument("--record-mcap", action="store_true", default=None)
+    parser.add_argument("--combat-hud", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--scenarios", type=Path)
+    parser.add_argument("--split", choices=("validation", "test"))
+    parser.add_argument("--course", type=int)
+    parser.add_argument("--cases", type=int, nargs="+")
     parser.add_argument("--config", type=Path, help="tool configuration JSON")
     parser.add_argument("--device")
     parser.add_argument("--output-dir", type=Path, help="parent directory for a new evaluation run")
@@ -416,7 +423,17 @@ def main():
     args = parser.parse_args()
     overrides = {}
     if args.checkpoint is not None:
-        overrides.update(mode="checkpoint", checkpoint=str(args.checkpoint), replay=None)
+        overrides.update(mode="checkpoint", checkpoint=str(args.checkpoint), replay=None, actor=None)
+    if args.actor is not None:
+        overrides.update(mode="actor", actor=str(args.actor), checkpoint=None, replay=None)
+    if args.record_mcap is not None:
+        overrides["record_mcap"] = args.record_mcap
+    if args.combat_hud is not None:
+        overrides["combat_hud"] = args.combat_hud
+    for key in ("scenarios", "split", "course", "cases"):
+        value = getattr(args, key)
+        if value is not None:
+            overrides[key] = str(value) if isinstance(value, Path) else value
     if args.replay is not None:
         overrides.update(mode="replay", replay=str(args.replay), checkpoint=None)
     if args.live:
@@ -436,6 +453,9 @@ def main():
 
     previous = signal.signal(signal.SIGTERM, stop)
     try:
+        if config.get("record_mcap"):
+            from tools.training.foxglove_replay import run
+            return run(config)
         if mode == "live":
             from tools.training.manual import run_manual
             scene_seed = (config["scene_seed"] if config["scene_seed"] is not None
@@ -481,4 +501,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

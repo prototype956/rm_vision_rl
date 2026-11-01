@@ -1,7 +1,9 @@
 # CPU 多环境采样实测（2026-09-24）
 
-保持每环境 `n_steps=1024` 的最新实测中，**16 个独立环境**约 **221.35 样本/秒**，
-是同轮单环境的 **15.96 倍**；包含启动、保存和关闭时为 **15.77 倍**。物理步长始终保持 **1 ms**。
+本文保留 2026-09-24 的 MLP 历史测量。对应新训练预设已删除；复现实验需使用原产物中的配置副本。当前训练支持 [v2](curriculum_training_v2.md)／[v3](curriculum_training_v3.md) GRU 课程，下列吞吐不代表当前 GRU/128 环境性能。
+
+保持每环境 `n_steps=1024` 的最新实测中，16 个独立环境约 221.35 样本/秒，
+是同轮单环境的 15.96 倍；包含启动、保存和关闭时为 15.77 倍。物理步长始终保持 1 ms。
 这是采样与训练吞吐的加速，尚不证明达到同等策略质量所需的时间同比缩短。
 
 ## 固定每环境 1024 步：单环境与 16 环境
@@ -17,7 +19,7 @@
 | 16 | 1024 | 16384 | 32768 | 148.04 s | 221.35 | 15.96× |
 
 计入进程启动、最终模型保存及关闭，平均端到端时间分别为 149.05 s、151.21 s，
-吞吐分别为 13.74、216.71 样本/秒，加速 **15.77 倍**。
+吞吐分别为 13.74、216.71 样本/秒，加速 15.77 倍。
 两组总用时接近，但 16 环境完成了 16 倍样本。
 
 | 每组耗时拆分（两次平均） | 单环境 | 16 环境 |
@@ -33,13 +35,13 @@
 
 ```bash
 artifacts/venv/bin/python -m tools.training.benchmark \
-  --config config/training/rotation_joint_shared_score_ppo.json \
+  --training-config <历史实验配置副本.json> \
   --rollout-mode per-env --updates 2 --n-envs 1 16 --repeats 2 \
   --output-dir artifacts/performance/fixed1024-check
 ```
 
 原始产物位于 `artifacts/performance/parallel-fixed1024-20260924/`，包括各组配置、日志、模型、
-`results.json`、`verification.json` 和 `report.md`。正式训练可使用原配置加 `--n-envs 16`。
+`results.json`、`verification.json` 和 `report.md`。历史实验可使用归档配置加 `--n-envs 16`。
 每环境采样长度保持不变，但总 rollout 增至 16384；相同总样本预算下，采样与优化交替的轮数
 会减少，学习效果仍需独立评估。下面保留此前固定总 rollout 的实验，不能混淆两种设置。
 
@@ -55,7 +57,7 @@ artifacts/venv/bin/python -m tools.training.benchmark \
 | 8 | 128 | 168.67 | 1.86× | 160.36 | 9.51 |
 | 16 | 64 | 221.05 | 2.43× | 204.22 | 11.67 |
 
-4→8 的训练吞吐提高约 **86%**，8→16 再提高约 **31%**，扩展收益开始递减。
+4→8 的训练吞吐提高约 86%，8→16 再提高约 31%，扩展收益开始递减。
 只按本次吞吐选择，16 环境最快；8 环境消耗的 CPU 和进程资源较少。
 CPU 数据来自每秒读取训练进程树的用户态/内核态 CPU 时间，包含启动和关闭，属于近似平均值。
 本机可见 20 个逻辑 CPU，16 环境并未持续跑满所有核；不能据此直接推断继续增加环境的收益。
@@ -70,6 +72,7 @@ RSS 之和可能重复计算共享页，不代表独占物理内存。
 
 ```bash
 artifacts/venv/bin/python -m tools.training.benchmark \
+  --training-config <历史实验配置副本.json> \
   --output-dir artifacts/performance/parallel-scaling-check \
   --n-envs 4 8 16 --timesteps 8192 --repeats 2
 ```
@@ -78,7 +81,7 @@ artifacts/venv/bin/python -m tools.training.benchmark \
 `results.json` 和 `scaling-summary.json`；同级 `.resources.jsonl` 保存逐秒资源记录。
 
 若要按本次实验设置训练，配置副本使用 `n_envs=8, ppo.n_steps=128`，或
-`n_envs=16, ppo.n_steps=64`。现有四环境配置仍保留。
+`n_envs=16, ppo.n_steps=64`。该四环境配置需从历史产物取回。
 注意 16 环境时每条 rollout 只有 0.64 秒，GAE 截断更频繁，长期学习效果需另外验证。
 直接在四环境配置上加 `--n-envs 16` 会保留 `n_steps=256`，形成每次更新 4096 样本，
 这与本次固定总 rollout 的对照设置不同。
@@ -107,31 +110,25 @@ artifacts/venv/bin/python -m tools.training.benchmark \
 “训练”另含首次 reset、PPO 参数更新和逐次日志；“端到端”还计入解释器/worker 启动、最终保存及关闭。
 两次 PPO 参数更新共约 0.61–0.67 秒；在四环境下仍只占训练时间约 2.5%，主要时间仍在采样链路。
 
-改变环境数会改变场景流和轨迹长度，因此另做了**相同四环境顺序执行**的配对对照：
+改变环境数会改变场景流和轨迹长度，因此另做了相同四环境顺序执行的配对对照：
 
 | 运行方式 | 总样本 | 训练时间 | 训练吞吐 |
 |---|---:|---:|---:|
 | 四环境 DummyVecEnv 顺序执行 | 2048 | 148.19 s | 13.82 |
 | 四环境 SubprocVecEnv 并行执行（第一轮） | 2048 | 26.23 s | 78.07 |
 
-该配对对照的全部 **2048 条动作日志逐字节一致**，并行加速 **5.65 倍**。
+该配对对照的全部 2048 条动作日志逐字节一致，并行加速 5.65 倍。
 这排除了该配对实验中场景/动作差异的解释；超线性加速的线程调度、等待与 CPU 频率贡献尚未单独测量。
 不应把这个倍率当作其他机器、环境数或训练配置的保证。
 
 ## 使用与复现
 
-新训练使用 `config/training/rotation_joint_shared_score_ppo.json`，并通过 `--n-envs` 覆盖并行环境数。
-启动、恢复、日志和基准工具说明见[运行文档](running.md#3-ppo-训练恢复和推理)。
+当前新训练默认读取步兵 v2 课程，哨兵使用独立预设。启动和恢复见 [运行文档](running.md#ppo-训练恢复和推理)，
+正式资格验证使用 `tools.training.curriculum_v2 benchmark`，不以本页旧 MLP 吞吐作为验收指标。
 
-```bash
-artifacts/venv/bin/python -m src.training.train \
-  --config config/training/rotation_joint_shared_score_ppo.json \
-  --output-dir artifacts/training/joint-parallel
-
-artifacts/venv/bin/python -m tools.training.benchmark \
-  --output-dir artifacts/performance/parallel-check \
-  --n-envs 1 2 4 --timesteps 2048 --repeats 2
-```
+复现历史测量时，从下面的原始产物目录取回对应配置，使用
+`tools.training.benchmark --training-config <历史实验配置副本.json>`。
+不要用当前课程预设替代原配置后继续沿用旧实验数字。
 
 本次原始产物（位于被 Git 忽略的 `artifacts/`）：
 
@@ -139,7 +136,7 @@ artifacts/venv/bin/python -m tools.training.benchmark \
 - `artifacts/performance/parallel-serial-reference-20260924/`：四环境顺序对照、`comparison.json` 和 `reproduce.py`。
 - `artifacts/performance/parallel-validation-20260924-v2/`：真实闭环兼容性验证、`results.json` 和复现脚本。
 
-## 正确性验证
+## 当时执行的正确性验证
 
 - 相同两个环境串行/并行各 64 样本，跨 4 次自动 reset；观测、奖励、掩码、终止标记和末观测逐项完全一致。
 - 两环境短训练后切换四环境恢复：从 64 步继续，请求 32 步按完整 rollout 取整为 64 步，最终累计 128 步。
@@ -150,3 +147,6 @@ artifacts/venv/bin/python -m tools.training.benchmark \
 
 四环境配置缩短了每环境的 rollout，GAE 的截断位置随之改变。后续应以相同总样本预算和独立
 评估场景比较伤害/收敛，不能用吞吐实验的训练奖励判断模型优劣。
+
+
+证据范围：本页数字与验证结论沿用历史记录，原始产物位于上述被 Git 忽略的目录。本次编辑未重新运行测量；若产物不可用，则无法独立复核这些数值。各设置只重复两次，未报告置信区间，吞吐差异不能替代等预算、多随机种子的策略质量比较。

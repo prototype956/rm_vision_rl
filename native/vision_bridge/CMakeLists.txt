@@ -3,7 +3,7 @@ project(rmvision_rl_bridge LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Eigen3 REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core calib3d imgproc)
+find_package(OpenCV REQUIRED COMPONENTS core calib3d imgproc imgcodecs)
 find_package(Ceres REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(Threads REQUIRED)
@@ -19,8 +19,15 @@ file(GLOB PREDICTOR CONFIGURE_DEPENDS ${MODULES}/armor_predictor/*.cpp ${MODULES
 file(GLOB CONTROL CONFIGURE_DEPENDS ${MODULES}/fire_control/*.cpp)
 file(GLOB REFINER CONFIGURE_DEPENDS ${MODULES}/armor_corner_refiner/*.cpp ${MODULES}/armor_corner_refiner/detail/*.cpp)
 file(GLOB PLANNER CONFIGURE_DEPENDS ${MODULES}/gimbal_trajectory_planner/*.cpp ${MODULES}/gimbal_trajectory_planner/detail/*.cpp)
-add_executable(rmvision-rl-bridge bridge.cpp policy_wire.cpp ${PNP} ${PREDICTOR} ${CONTROL} ${PLANNER} ${REFINER}
+include(${VISION_ROOT}/src/tool/foxglove/offline.cmake)
+add_library(rmvision-rl-common OBJECT policy_wire.cpp replay_diagnostics.cpp ${PNP} ${PREDICTOR} ${CONTROL} ${PLANNER} ${REFINER}
   ${MODULES}/armor_detector/armor_detector_postprocess.cpp ${VISION_ROOT}/src/core/logger.cpp)
-target_include_directories(rmvision-rl-bridge PRIVATE ${VISION_ROOT}/src ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(rmvision-rl-bridge PRIVATE Eigen3::Eigen Ceres::ceres ${OpenCV_LIBS}
-  yaml-cpp mv-3rdparty-tinympc fmt::fmt spdlog::spdlog Threads::Threads)
+target_include_directories(rmvision-rl-common PUBLIC ${VISION_ROOT}/src ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rmvision-rl-common PUBLIC Eigen3::Eigen Ceres::ceres ${OpenCV_LIBS}
+  yaml-cpp mv-3rdparty-tinympc fmt::fmt spdlog::spdlog Threads::Threads mv-foxglove-offline)
+
+add_executable(rmvision-rl-bridge bridge.cpp)
+target_link_libraries(rmvision-rl-bridge PRIVATE rmvision-rl-common)
+add_executable(rmvision-rule-bridge bridge.cpp)
+target_compile_definitions(rmvision-rule-bridge PRIVATE RM_RULE_COMPARISON=1)
+target_link_libraries(rmvision-rule-bridge PRIVATE rmvision-rl-common)

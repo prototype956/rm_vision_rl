@@ -11,6 +11,7 @@ _SCHEMAS = {
     "view": {
         "mode", "checkpoint", "replay", "device", "output_dir", "viewer_binary", "label",
         "open_view", "scene_count", "scene_seeds", "workers", "scene_seed",
+        "actor", "record_mcap", "scenarios", "split", "course", "cases", "combat_hud",
     },
     "analysis": {"run_dir", "device", "evaluation_scenes", "viewer_binary", "open_view"},
     "compare": {"checkpoint", "baseline_checkpoint", "output_dir", "device", "workers"},
@@ -21,7 +22,7 @@ _SCHEMAS = {
 }
 
 _PATH_FIELDS = {
-    "view": {"checkpoint", "replay", "output_dir", "viewer_binary"},
+    "view": {"checkpoint", "actor", "scenarios", "replay", "output_dir", "viewer_binary"},
     "analysis": {"run_dir", "viewer_binary"},
     "compare": {"checkpoint", "baseline_checkpoint", "output_dir"},
     "manual": {"config", "checkpoint", "output_dir", "viewer_binary"},
@@ -32,7 +33,8 @@ _PATH_FIELDS = {
 _DEFAULTS = {
     "view": {"mode": "checkpoint", "replay": None, "device": "cpu", "output_dir": "artifacts/evaluation",
              "viewer_binary": None, "label": None, "open_view": True, "scene_count": 1,
-             "scene_seeds": [], "workers": 4, "scene_seed": None},
+             "scene_seeds": [], "workers": 4, "scene_seed": None, "actor": None,
+             "record_mcap": False, "combat_hud": True, "scenarios": None, "split": "validation", "course": None, "cases": []},
     "analysis": {"device": "cpu", "evaluation_scenes": 5, "viewer_binary": None, "open_view": False},
     "compare": {"output_dir": "artifacts/comparison", "device": "cpu", "workers": 4},
     "manual": {"mode": "checkpoint", "config": None, "episode_steps": None,
@@ -64,8 +66,26 @@ def _validate(tool, config):
 
     if tool == "view":
         mode = config.get("mode", "checkpoint")
-        if mode not in ("checkpoint", "replay", "live"):
+        if mode not in ("checkpoint", "actor", "replay", "live"):
             raise ValueError("tools.view.mode must be checkpoint, replay, or live")
+        if type(config["record_mcap"]) is not bool:
+            raise ValueError("record_mcap must be boolean")
+        if type(config["combat_hud"]) is not bool:
+            raise ValueError("combat_hud must be boolean")
+        if sum(bool(config.get(k)) for k in ("checkpoint", "actor", "replay")) > 1:
+            raise ValueError("checkpoint, actor and replay are mutually exclusive")
+        if mode == "actor" and (not config.get("actor") or not config["record_mcap"]):
+            raise ValueError("Actor requires explicit MCAP recording")
+        if config["record_mcap"]:
+            if mode not in ("checkpoint", "actor"):
+                raise ValueError("MCAP recording requires a model")
+            if not config.get("scenarios") or type(config.get("course")) is not int or config["course"] < 0:
+                raise ValueError("MCAP recording requires frozen scenarios and course")
+            cases = config.get("cases")
+            if not isinstance(cases, list) or not cases or any(type(c) is not int or c < 0 for c in cases) or len(set(cases)) != len(cases):
+                raise ValueError("cases must be unique nonnegative integers")
+            if config["split"] not in ("validation", "test"):
+                raise ValueError("split must be validation or test")
         if config.get("checkpoint") and config.get("replay"):
             raise ValueError("tools.view.checkpoint and replay are mutually exclusive")
         if type(config.get("scene_count", 1)) is not int or config.get("scene_count", 1) < 1:

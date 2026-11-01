@@ -1,5 +1,7 @@
 # 接口与配置
 
+本页按通信、环境、策略、训练和评估顺序说明接口。当前课程使用 v5 单步 GRU；通信 wire v1、Actor schema v5、课程 v2/v3 是不同的版本号，不能互相替代。历史短历史数组及 MLP 网络契约见[历史接口](legacy_interfaces.md)。
+
 ## 仿真客户端
 
 `TrainingClient` 连接本机 Unix socket。协议 v1 为 4 字节大端长度加 UTF-8 JSON，单消息最大 16 MiB，单连接串行请求。客户端维护 request_id、round_id 和 step_id。
@@ -16,7 +18,7 @@
 
 响应含 `ok`、关联编号、`sim_time_ns` 和 `data`。data 中 `feedback`、`self_referee`、`self_weapon`、`visual_frames` 用于控制；`evaluation`、`events`、`reward_damage` 用于独立统计。Reset 的 `previous_round` 是旧回合截断摘要，不是新回合奖励。
 
-`self_weapon` v1 含 `version`、`valid`、`sample_ns` 和 `fire_blocks`，每物理步更新，只允许自身机械间隔（bit 5）、供弹忙（bit 6）和枪口无效（bit 7）。Python 桥接用该通道替换裁判快照的对应位，再交给 C++；生命、热锁、弹量及裁判样本时间保持原口径。武器反馈无效、来自未来或超过 10 ms 时禁止发射，格式/版本错误直接报错。不含该字段的旧仿真器沿用旧的保守处理。该组合不读取 `evaluation`，不改变网络观测维度或策略动作接口。
+`self_weapon` v1 含 `version`、`valid`、`sample_ns` 和 `fire_blocks`，每物理步更新，只允许自身机械间隔（bit 5）、供弹忙（bit 6）和枪口无效（bit 7）。旧观测路径的 Python 桥接用该通道替换裁判快照的对应位，再交给 C++；生命、热锁、弹量及裁判样本时间保持原口径。武器反馈无效、来自未来或超过 10 ms 时禁止发射，格式/版本错误直接报错。不含该字段的旧仿真器沿用旧的保守处理。该组合不读取 `evaluation`，不改变网络观测维度或策略动作接口。
 
 合成视觉的结构遮挡仍检查装甲中心和四角，但排除弹丸碰撞体。短时遮住一个采样点的小弹丸不应被等价为整块装甲消失；墙体、地形和机器人结构仍参与遮挡，弹丸物理碰撞、CCD 与伤害计算保持不变。这是合成检测近似，不是像素级遮挡模型。
 
@@ -26,7 +28,7 @@
 
 ## 场景和测量
 
-场景定义位于仿真项目 `src/training/scenario.rs`：
+场景定义位于仿真项目 `src/training/scenario.rs`。下表为旧静止/旋转任务的顶层字段；当前多车型任务通过 `duel.controlled/target` 定义双方，见[多车型环境](multirobot_environment.md)。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -42,10 +44,10 @@
 | motion 示例 | 行为 |
 | --- | --- |
 | `{"kind":"static"}` | 静止 |
-| `{"kind":"translation","amplitude_m":0.5,"speed_m_s":2.0}` | 世界 X 方向正弦平移；幅度 (0,2] m，峰值速度 [0,4] m/s |
+| `{"kind":"translation","amplitude_m":0.5,"speed_m_s":2.0}` | 沿初始车体局部 +X 的正弦平移；可用 translation_heading_rad 指定世界路径轴；幅度 (0,2] m，峰值速度 [0,4] m/s |
 | `{"kind":"rotation","angular_speed_rad_s":3.0}` | 匀速旋转；角速度 [-7,7] rad/s |
 
-未指定出生/角度字段按 seed 采样。位置和路径经过场地合法性检查；显式非法场景可能被拒绝，不保证每个距离/方位组合都可放置。己方底盘当前固定。
+未指定出生/角度字段按 seed 采样。位置和路径经过场地合法性检查；显式非法场景可能被拒绝，不保证每个距离/方位组合都可放置。旧顶层场景的己方底盘固定；duel 场景支持双方脚本运动。
 
 | measurements 字段 | 默认值 | 含义 |
 | --- | --- | --- |
@@ -56,136 +58,22 @@
 
 空检测仍交付时间戳，不等于相机停帧或网络丢包。当前噪声、固定延迟和几何遮挡近似不等于已标定的完整渲染检测误差。
 
-## 评估会话
+多车型任务不接受 `target_hp` 覆盖或无限热量。`visibility_admission="full_path_clear"` 为课程 v3 修订 3 的全路径可见性准入，字段省略保留旧行为；适用运动和证书范围见[课程 v3](curriculum_training_v3.md#修订-3原地图全路径无遮挡)。
 
-`EvaluationSession(client, bridge, config=None, warmup_config=None, policy=None, policy_mode='rule')` 提供 `reset(seed, scenario)`、`advance()`、`info()`。它不是 Gymnasium `step(action)`，动作通过构造时传入的回调返回。
+## 当前 Gym 接口
 
-```text
-idle → warming → evaluating → settling → complete
-           └─ warmup_timed_out       └─ settlement_timed_out
-运行异常 → fault
-```
+`RMMultiRobotFire-v0` 对应 `MultiRobotFireEnv`，复用 `FireEnv` 的控制周期。课程由训练层生成阶段场景，通用环境本身不负责晋级。
 
-预热默认要求 5 个连续新鲜 tracking 图像帧，最大图像年龄 100 ms，期限 15 s。确认按新图像而不是控制调用次数计数。预热禁射，就绪后保持物理和估计历史连续，单独开始评估计时。
-
-`EvaluationConfig` 默认 `window_ms=30000`、`max_settle_steps=1000`、`target_hp=100000`。这些仅控制评估会话，Gym 采样使用下节的独立回合边界。
-
-评估中己方死亡或目标被击毁时提前关窗并自然结算。`info.end_reason` 区分 `time_limit`、
-`controlled_dead` 和 `target_destroyed`；真正终止优先于同时到达的时间上限。提前结束仍使用
-实际结束时间作为出膛归属的右开边界。
-
-模型回放入口 `tools.training.view.evaluate_checkpoint(checkpoint, device=None, output_dir=None)` 返回
-完整回放文件路径。它按保存模式复用 `DecisionPolicy` 与 Gym 的动作编码，并使用相同 Gym RNG 派生
-出生种子；通过已有模型加载器检查兼容性。`tools.training.view.open_replay(path, viewer_binary=None)`
-只启动显示进程，缺少图形环境或程序时返回 `False` 并保留文件。
-
-`replay.json` 当前 `version=1`：头部包含 `model`、`fingerprints`、`render` 路径、`scene_seed`、
-`reset_attempts` 和 `scenario`；`frames` 保存每个 10 ms 周期的 `time_ns`、`phase`、`metrics`、
-真实姿态与事件 `data`，`summary` 保存原始伤害与最终 `WindowScore`。不推进时间的关窗事件
-合并进同时间戳的末帧，不重复记录物理周期。真值仅供计分与显示，不进入模型观测。
-`settlement_timed_out` 的回放可查看已有过程，但 `official_damage=null`，不能解释为完整得分。
-
-## 静止靶 Gymnasium
-
-安装依赖并 `import src` 后，用 `gymnasium.make('RMStaticFire-v0')` 创建环境，
-也可直接导入 `src.environment.static_fire.StaticFireEnv`。
-构造参数为 `simulator_root`、`vision_root`、`simulator_binary`、`bridge_binary`、
-`simulator_config`、`log_dir`、`episode_steps=3000`、`warmup_config=None`、`render_mode=None`、
-`decision_clock=None`、`action_mode="fire_only"`。
-路径默认使用当前仓库及相邻的 `rm_simulator_2027`、`rm_vision_2027`，仿真二进制默认 Release。
-无渲染模式是唯一支持的渲染设置；用 `episode_steps` 配置时限，勿额外叠加 `TimeLimit`。
-
-| 接口 | 行为 |
+| 方法 | 返回与约束 |
 | --- | --- |
-| `reset(seed=None, options=None)` | 返回 `(obs, info)`；启动或复用进程，禁射预热并准备首个决策 |
-| `step(action)` | 返回 `(obs, reward, terminated, truncated, info)`；恰好推进 10 ms |
-| `action_masks()` | 返回当前 `bool[action_count]` 副本；需处于正式采样状态 |
-| `close()` | 取消未提交周期、释放进程和 socket；可重复调用 |
+| `reset(seed=None, options=None)` | `(obs, info)`；完成出生准入、禁射预热并准备首个决策 |
+| `step(action)` | `(obs, reward, terminated, truncated, info)`；推进 10 ms |
+| `action_masks()` | 当前合法动作的布尔副本 |
+| `close()` | 取消未提交周期并回收进程，可重复调用 |
 
-默认省略 `action_mode` 时动作空间 `Discrete(2)`：0 跟踪规则槽位且不新增射击请求；1 在该槽位请求单发。
-无规则槽位时动作 0 映射到底层 WAIT。动作 0 不撤销已接纳脉冲。
-被掩码禁止的动作 1 执行动作 0，`info.action_masked=True`，无额外奖励或惩罚。
-Python/NumPy 整数均支持；bool、浮点和越界动作在物理推进前报错。
-九动作回调接口保持原来的严格检查，不会自动替换非法动作。
+课程使用 `joint/Discrete(9)`。手动 Gym 输入若被掩码禁止，射击降级为同槽位 TRACK，槽位无效则 WAIT；PPO 采样器遇到动作降级会报错。底层九动作回调严格拒绝非法动作，二者不可混淆。`obs` 含 Actor 白名单和仅训练 Critic 使用的 `privileged[3136]`，形状、归一化和重置事件见[GRU 契约](persistent_gru.md#单步与状态接口)。`info` 含场景真值、奖励分项及执行诊断，禁止整体送入 Actor。
 
-fire_only 的 `obs` 为 Dict：`features=float32[8,90]`、`valid=int8[8]`、`action_mask=int8[2]`。
-`features` 范围 [-1,1]，后两项为 0/1；每次返回独立数组。没有策略回调的周期填零行且
-valid=false，掩码为 `[1,0]`。Reset 和目标代次变化清空历史，代次仅作为内部复位元数据。
-语义年龄 null 编码为对应归一化上限 1；`since_request_s=null` 表示从未请求，同样编码为 1。
-
-`options` 仅支持 `{'scenario': {...}}`，字段沿用仿真场景接口，但 motion 必须为 static，
-measurements 必须启用。缺省填入距离 4 m、HP 100000、噪声 0.25 px、延迟 20 ms、空检测概率 0。
-其他出生参数仍按仿真种子采样。Gym seed 初始化其随机流，并从中派生仿真 seed；二者不等同。
-几何无效出生最多尝试 32 个派生 seed，使用新请求编号；尝试和拒绝原因在 `info.reset_attempts`。
-预热超时、配置错误及通信故障不会重采样掩盖，而是报错并清理进程；下次 Reset 重新启动。
-
-正式阶段丢失目标继续采样，不重新预热。己方死亡或目标击毁返回 terminated；否则达到
-episode_steps 返回 truncated，二者相遇以真正终止为准。末观测来自旧回合真实末时刻，
-没有提交下一动作或推进下一物理步。结束后 Step 报错，必须 Reset。
-
-奖励为 `float(reward_damage)`，仅计算本次推进实际发生的伤害，不包含预热及 Reset 摘要。
-时间截断不执行尾部结算，Reset 会丢弃旧世界在途弹丸；训练器必须保留末观测并进行
-时间截断价值自举。训练累计奖励不是窗口归属评估分数，不能用末尾结算奖励和自举重复补偿。
-
-`info` 提供 `damage`、`episode_damage`、`actual_shots`、`episode_steps`、`episode_time_s`、
-`physical_time_ns`、`end_reason`、`action`、`action_masked`、`shot_requested`、
-`shot_accepted`、`reject_reason`、`reset_attempts` 和 `warmup`。请求状态对应刚执行的动作，
-返回 obs/mask 对应下一决策周期。info 含实验及评估数据，禁止整体送入网络。
-
-## 随机旋转靶 Gym
-
-`RMRotationFire-v0` / `RotationFireEnv` 与静止靶共用 `FireEnv` 的进程、预热、观测、
-动作和奖励接口。额外构造参数 `angular_speed_range_rad_s=(1, 7)` 指定角速度大小范围。
-`options.scenario` 不允许包含 motion；默认不补齐位置、距离、方位或朝向，交给仿真器采样。
-HP 和测量默认值与静止靶相同，旋转不会增加策略观测字段。
-
-每回合从 Gym RNG 取一个 `episode_seed`，再通过固定域 0/1 派生角速度和出生重试子流。
-角速度大小均匀采样、正反方向等概率，正号按 Bevy 世界 +Y 右手旋转。出生失败只重抽仿真种子，
-不改变本回合角速度或下一回合采样结果。仿真器 revision 5 在非零旋转出生时以固定初始
-相机每 5° 检查整圈可见性；地形遮挡导致某相位无完整可见装甲时按非法出生重试，
-通过后仍执行原有预热确认。预热期间也持续旋转，超时直接报错。
-
-`prepare_scene(seed=None, options=None)` 仅采样并返回 `(scenario, spawn_rng, sample)`，
-不启动进程；它会消耗一次场景采样，供 Gym reset 和独立评估共用，不应在 reset 前额外调用。
-显式 Gym seed 重启序列；`reset()` 继续。`info.scene` 包含从 0 开始的 `episode_index`、
-`episode_seed`、`angular_speed_rad_s`、成功的 `spawn_seed` 和仿真器出生报告 `scenario`。
-每次成功出生时写入环境目录 `scenes.jsonl`，包含全部 `reset_attempts`；该记录不代表预热成功。
-这些真值仅用于复现与诊断，禁止送入策略网络。
-
-检查点保存未采样的场景模板与速度范围；单模型评估默认取保存种子派生的首个场景，
-训练后分析会在多个共享派生场景上进行评估，
-同配置的候选检查点使用相同的多场景评估集合比较，不代表更大范围的跨场景泛化成绩。
-回放头部增加 `scene_sample`（场景序号、回合种子、角速度、成功出生种子），
-`scenario` 仍记录实际出生报告；旧回放读取不依赖新字段。
-
-## PPO 配置与检查点
-
-训练入口为 `python -m src.training.train`，默认读取
-`config/training/rotation_joint_shared_score_ppo.json`。配置包含版本、算法/策略类型、PPO seed、device、
-torch_threads、total_timesteps、checkpoint_updates、environment 和 ppo。
-当前默认使用 `maskable_ppo/shared_score_mlp`；加载旧检查点仍兼容已实现的策略结构。
-`ppo.net_arch` 分别配置 Actor 的 pi 和 Critic 的 vf 层宽，
-激活函数固定 Tanh；其余初始参数见配置。学习率和 clip 为常数，不支持分段调度。
-
-environment 包含 episode_steps、scene_seed、scenario，并可配置 Gym 的五个路径参数
-simulator_root、vision_root、simulator_binary、bridge_binary、simulator_config。
-可选 `environment.decision_clock` 包含 `min_interval_ms`、`max_interval_ms`、`resample`、`seed` 四个必需字段。
-区间端点为 10 ms 的整数倍，支持 10–60000 ms 且最小值不大于最大值；`resample` 为 `decision`（每次机会后采样）或 `episode`（每回合采样一个周期），seed 为独立的 32 位非负整数。省略整个对象表示关闭，保留旧动作契约。
-可选 `environment.task` 为 `static_fire`（省略时保持旧行为）或 `random_rotation_fire`。
-旋转任务的 `angular_speed_range_rad_s` 默认 `[1, 7]`，要求有限数值且 `0 < min <= max <= 7`；
-静止任务禁止该字段，旋转任务禁止在 `scenario` 中指定 `motion`。
-场景与模型 seed 独立；包装器忽略 SB3 的环境播种请求。静止任务每次 Reset 重用固定种子；
-旋转任务仅首次用 scene_seed 初始化，随后持续采样。恢复训练重启场景序列，不恢复其进度。
-`--config` 和 `--resume` 互斥；恢复不接受 `--seed`，只允许覆盖 device、追加 timesteps 和新输出目录。
-
-模型 ZIP 使用 SB3 格式保存权重、优化器和累计步数，并额外嵌入 `rmvision.json`，将配置、
-观测版本/形状/类型/特征 schema 指纹、对应模式动作语义、环境/视觉配置指纹、依赖版本与完整更新
-次数一起保存。模型构建和加载统一经 `training.models`；加载前检查类型和观测/配置兼容性，
-加载后清空旧观测，由新回合开始采样。不能把旧 MLP 检查点直接当成未来 GRU 检查点。
-
-`run.json` 为运行配置与状态记录；`episodes/monitors/*.monitor.csv` 为原始回合统计，
-`logs/progress.csv` 和 TensorBoard event 为完整更新日志。`latest.zip` 是最近保存的完整
-检查点副本，通过同目录临时文件原子替换；失败或中断不会覆盖为部分更新模型。
+目标击毁或己方死亡为自然终止；额度耗尽后继续处理待发请求及在途弹丸；30 s 上限为时间截断。末观测来自原回合，截断不追加评估尾部奖励。静止/旋转靶专有的默认值与出生种子规则见[历史 Gym 接口](legacy_interfaces.md)。
 
 ## 策略动作
 
@@ -205,129 +93,79 @@ simulator_root、vision_root、simulator_binary、bridge_binary、simulator_conf
 
 C++ 在同周期发送观测并等待动作，然后完成控制计算。前置输入无效时可能不调用策略；完整 LOST 时桥接可执行禁射搜索。无策略回调不等于本步未推进，标准训练封装需要处理这一情况。
 
-## 观测
-
-语义回调主要接收 `estimate`、`feedback`、`referee`、四个 `candidates`、数据年龄、上次槽位、距请求时间和 `action_mask`。实际字段以 [policy_wire.cpp](../native/vision_bridge/policy_wire.cpp) 为准。
-
-[observations.py](../src/policy/observations.py) 显式选择字段，按 [v1.json](../config/observations/v1.json) 顺序编码，不展开整个诊断对象。
-
-| 输出 | 约定 |
-| --- | --- |
-| `version` | 1 |
-| `features` | 8 × 90，从旧到新；float32 精度数值，缩放并裁剪至 [-1,1] |
-| `valid` | 8 个历史行有效性标记 |
-| `action_mask` | 9 个布尔值 |
-
-`TensorPolicy` 给 actor 的数据是普通 Python 列表，不是 NumPy/PyTorch 张量。每个控制步推进历史；无语义回调时该行保持零和 valid=false。回合 Reset 清空历史；桥接按目标代次变化通知历史复位，代次不进入 actor 输入。actor 接收副本，不能修改后续周期历史。Gym 再将这些数值转换为上述 NumPy 数组及二动作掩码。
-
 ## 随机射击决策时钟
 
 `DecisionPolicy`（含 `StaticFirePolicy`、`JointFirePolicy`）和 Gym 可启用独立决策时钟。预热完成后第 0 个控制步为首次机会；每个到期机会执行完一个 10 ms 步后，从闭区间内的离散步数等概率抽取下一间隔。抽样不接收策略动作，TRACK、物理禁射、无回调/LOST 都会消耗该机会，不排队补发。非到期步禁止新的射击请求，联合模式仍允许任意合法槽位的 TRACK/保持；已有脉冲和在途命令仍由原火控处理。计时只随成功完成的物理步前进，读取观测、暂停、目标代次/历史复位均不改变时钟。
 
-启用时，Gym 二动作观测额外含 `decision_clock: float32[5]`，依次为是否到期、距下次机会的秒数、最小间隔秒数、最大间隔秒数、每回合固定周期秒数（逐次采样模式为 0）；不含真实目标状态或命中信息。基础 8×90 特征保持不变。检查点 `action_version=2` 并记录时钟特征契约，配置指纹包括区间、种子和采样方式，不能在旧无时钟权重上静默开启。
+旧短历史模式启用时，Gym 二动作观测额外含 `decision_clock: float32[5]`，依次为是否到期、距下次机会的秒数、最小间隔秒数、最大间隔秒数、每回合固定周期秒数（逐次采样模式为 0）；不含真实目标状态或命中信息。基础 8×90 特征保持不变。检查点 `action_version=2` 并记录时钟特征契约，配置指纹包括区间、种子和采样方式，不能在旧无时钟权重上静默开启。
 
-独立 RNG 使用配置 seed 与回合流编号派生：同一环境的成功回合依次使用流 0、1、2……，即使固定场景 Reset 也不会重复同一时钟流。几何拒绝重试和预热不消耗时钟流。新环境/恢复训练从流 0 开始；独立模型评估也从流 0 开始，使同配置候选共享相同时间表。`DecisionPolicy` 的调用方应在预热结束调用 `clock.start_episode()`，每个实际完成的控制步调用 `clock.complete_step()`；标准 Gym 与 `EvaluationSession` 已负责此流程，调用者不应重复推进。
+独立 RNG 使用配置 seed 与回合流编号派生：同一环境的成功回合依次使用流 0、1、2……，即使固定场景 Reset 也不会重复同一时钟流。几何拒绝重试和预热不消耗时钟流。旧非课程环境/恢复训练从流 0 开始；课程 GRU 恢复保留 worker 回合计数，避免重用回合流；独立模型评估也从流 0 开始，使同配置候选共享相同时间表。`DecisionPolicy` 的调用方应在预热结束调用 `clock.start_episode()`，每个实际完成的控制步调用 `clock.complete_step()`；标准 Gym 与 `EvaluationSession` 已负责此流程，调用者不应重复推进。
 
 `info.decision_clock_before` 对应刚提交的动作，`info.decision_clock` 对应返回观测；`physical_fire_legal_before` 区分原火控合法性，`clock_masked` 标识被时钟屏蔽的手动请求。环境日志 `env-*/decision-clock.jsonl` 逐次记录机会、动作、抽样间隔及接受结果。独立评估每步在 vision 结果内记录时钟前后状态，回放记录保存配置和时钟状态。原生 `rule` 无策略基线仍不加时钟；对照随机时钟下的始终发射基线应使用带同配置时钟的 `StaticFirePolicy`，选择当前合法的 FIRE。
 
 该功能随机化决策间隔，不随机化机械冷却、命令/视觉延迟；尚不构成跨车辆时序的完整域随机化。Gym 步长、gamma/GAE、奖励口径和回合长度均保持原样。
 
+当前 v5 始终提供单步 `decision_clock[5]`，由资源分支及开火头读取；完整输入见[持续记忆 GRU](persistent_gru.md#单步与状态接口)。v3 的传统对照使用独立 `rmvision-rule-bridge` 与共同 DecisionClock，区别于上文无外部时钟的通用 rule 会话。
+
+## PPO 配置与检查点
+
+训练入口为 `python -m src.training.train`，默认读取
+`config/training/rmul_2027_infantry_curriculum_v2.json`；哨兵使用
+`config/training/rmul_2027_sentry_curriculum_v2.json`。另有各角色的 v3 预设；v3 需要独立校准与发布流程。
+
+当前策略为 `recurrent_maskable_ppo/asymmetric_gru`、v5 单步观测和九动作；
+网络结构由 `recurrent_actor.py` 与 `recurrent_policy.py` 定义。默认单 GPU、128 环境、
+每环境至少 512 步后完成当前回合，统一执行循环 PPO 更新。完整回合按 128 步序列训练，
+最多 32 步预热，小批次 64 个片段。`ppo` 配置不再使用 MLP 的 `net_arch`。
+
+`environment` 配置回合长度、场景种子、角色、观测和动作模式；
+`decision_clock` 定义独立的 50–100 ms 射击机会，控制周期仍为 10 ms。
+`curriculum.version=2/3` 选择相应十二阶段课程；`thermal_reward` 配置热锁惩罚；
+`runtime={}` 启用长期运行默认值。详见 [课程 v2](curriculum_training_v2.md)。
+
+`--config` 与 `--resume` 互斥。新训练可覆盖预算、设备和环境数；课程恢复保留原累计预算、
+环境数、课程和随机流，从新回合零隐藏状态开始，仅完成剩余预算。预检和评估不计入训练步数。
+
+GRU 检查点 ZIP 包含 `rmvision.json` 与 `recurrent.pt`，保存模型、优化器、训练计数、
+随机流和课程状态；`latest.zip` 通过原子替换发布。NUC 使用独立导出的 TorchScript Actor，
+不加载 Critic。恢复前核对观测、场景及源码/二进制指纹。
+
+旧 MLP 检查点仍按 SB3 格式与原契约读取，用于历史实验；仓库不再提供旧训练预设。
+v4 MLP 接口见 [非对称观测](asymmetric_observations.md)，当前接口见 [持续记忆 GRU](persistent_gru.md)。
+
 ## 奖励与评估分数
 
-仿真 `reward_damage` 是本方本步实际伤害增量。Gym 将其作为逐步 reward，并按前述规则返回 terminated/truncated。
+仿真 `reward_damage` 是本方本步实际伤害增量。未配置奖励变换的旧 Gym 将其作为逐步 reward；当前课程再乘 reward_scale 并扣除选板、热锁成本，公式见[课程 v2](curriculum_training_v2.md#奖励及物理统计)。
 
 `WindowScore` 是独立评估计分器：只统计窗口 `[start_ns,end_ns)` 内实际出膛弹丸最终造成的本方实际伤害。窗口内出膛、窗口后命中计入；窗口后或恰好截止出膛不计入。重复事件不重复加分；结算不完整或事件异常时，不提供完整 `official_damage`。
 
 评估关窗停止新请求，已有供弹和在途弹丸继续按物理规则结算。Reset 截断旧世界，不能替代自然评估结算。训练采用时间截断价值自举，不把评估总分复制成每一步奖励。
 
-## 联合选板与开火契约
+## 评估会话
 
-训练配置可选 `environment.action_mode` 取 `fire_only` / `joint`，省略保持前者且不向旧配置
-注入字段，保证旧指纹。Gym 构造函数同名参数默认 `fire_only`，注册名称不变。当前唯一保留的新训练配置为
-`rotation_joint_shared_score_ppo.json`；历史配置和旧模型仍可通过检查点加载。场景采样器和动作模式互不依赖。
+`EvaluationSession(client, bridge, config=None, warmup_config=None, policy=None, policy_mode='rule')` 提供 `reset(seed, scenario)`、`advance()`、`info()`。它不是 Gymnasium `step(action)`，动作通过构造时传入的回调返回。
 
-joint 的 `Discrete(9)`：0 保持当前槽位且不新增射击请求；1/3/5/7 跟踪槽位 0/1/2/3；
-2/4/6/8 跟踪相同槽位并请求单发。无当前槽位时 0 等待。动作掩码为物理候选掩码与时钟约束的
-交集，只有四个射击动作受时钟限制。非法射击降级为同槽位 TRACK；槽位无效则 WAIT，不选另一板。
-PPO 采样器检测到降级即报错。合法动作仍可能因随后 MPC 等执行失败而被拒绝。
+```text
+idle → warming → evaluating → settling → complete
+           └─ warmup_timed_out       └─ settlement_timed_out
+运行异常 → fault
+```
 
-v2 的 `features=float32[8,107]`：前 90 列完整沿用 v1；按槽位 0→3 追加
-`facing_now_sin/cos`、`facing_impact_sin/cos` 共 16 列，最后是
-`selected_slot_age_s_normalized`，以 1 秒为上限。保留 `valid=int8[8]`、
-`action_mask=int8[9]` 和可选 `decision_clock=float32[5]`。
-当前朝向取预测基准加 prediction_age；命中朝向取候选保存的准确 prediction_horizon。
-角度是水平投影中，从装甲外法线到“装甲指向炮口”的有符号角，世界 +Z 为正。无效候选新增值全零。
-槽位时间在首次选中或切换后从零开始累计，无槽位为零；目标代次重置同时清除选板历史。
+预热默认要求 5 个连续新鲜 tracking 图像帧，最大图像年龄 100 ms，期限 15 s。确认按新图像而不是控制调用次数计数。预热禁射，就绪后保持物理和估计历史连续，单独开始评估计时。
 
-桥接原始 wire/observation 协议保持 v1，候选追加 `facing_now_rad`、`facing_impact_rad`，
-观测追加 `selected_slot_age_s`；v1 编码器忽略新增字段。`begin_training` 新增可选
-`policy_mode`，只接受 `fire_only`（缺省）/`nine`，评估继续使用原来的同名模式。
-联合检查点记录 tensor observation version 2、action_version 3、9 动作语义与 v2 schema 指纹。
-旧检查点使用原 v1 特征、动作版本和配置指纹，不接受跨模式加载，不提供权重转换。
+`EvaluationConfig` 默认 `window_ms=30000`、`max_settle_steps=1000`、`target_hp=100000`。这些仅控制评估会话，Gym 采样使用前述独立回合边界。
 
-`info` 与 `actions.jsonl` 记录请求 `action`、实际策略 `executed_action`、协议 `wire_action`、
-`selected_slot`、`slot_switched`、`slot_switches`、`mask_reason`（decision_clock/fire_control）及
-射击请求/接受结果。选板以控制器实际输出为准，首次获取和目标重建不计切板。
-Monitor 与 PPO 日志也记录切板数；旧检查点缓存中缺失该字段的回合不参与切板均值。
-这些计分/诊断字段不加入策略观测。
+评估中己方死亡或目标被击毁时提前关窗并自然结算。`info.end_reason` 区分 `time_limit`、
+`controlled_dead` 和 `target_destroyed`；真正终止优先于同时到达的时间上限。提前结束仍使用
+实际结束时间作为出膛归属的右开边界。
 
-`evaluate_checkpoint(..., scene_override=None)` 默认评估保存场景序列的首个场景；训练后分析会通过
-`scene_override` 复用多个共享场景并按平均归属伤害选优。
-对照工具传入 `{scene_id, scenario, spawn_seed}` 指定已验证出生；不修改保存契约、不再更换种子，
-并在回放保存覆盖参数和实际场景。比较要求两检查点的场景基础配置、时钟、视觉/物理配置一致，
-回合均为 500 步。距离与转速取固定 18 组合，其他初态随机；sampling_seed=10000+scene_id。
-HTML/JSON/CSV 单列失败，配对汇总仅统计双方完成的场景；命中率为总命中弹丸/总实际发射弹丸。
+历史 MLP 模型回放入口 `tools.training.view.evaluate_checkpoint(checkpoint, device=None, output_dir=None)` 返回
+完整回放文件路径。它按保存模式复用 `DecisionPolicy` 与 Gym 的动作编码，并使用相同 Gym RNG 派生
+出生种子；通过已有模型加载器检查兼容性。`tools.training.view.open_replay(path, viewer_binary=None)`
+只启动显示进程，缺少图形环境或程序时返回 `False` 并保留文件。
 
-
-### 可选 v3 选板记忆及奖励契约
-
-`environment.selection_memory=true` 仅适用于 joint；原 8×107 特征不变，
-增加独立 `selection_memory: MultiBinary(5)`，顺序为 [-1,0,1,2,3] one-hot，
-表示上一个不同的实际选中槽位。回合、目标代次、缺失策略回调、非 tracking 状态
-或相关候选失效时清除。训练/Gym 与检查点评估共用 DecisionPolicy 维护此状态，
-检查点观测契约 version=3；旧 v1/v2 契约不变。
-
-`selection_reward` 与 `switch_penalty` 互斥，字段为 `switch_cost`、`return_cost`、
-`return_window_s`、`facing_rate_per_s`、`facing_margin`，默认分别为
-0.002、0.03、0.1 秒、0.1/秒、0.1。要求有限非负数，返回窗口大于零、margin 小于 1。
-奖励仅改变 PPO 回报；评估伤害与裁判计分不变。
-`switch_reward_context` 在新模式额外保存 `return_slot`、`tracking_reliable`、
-`candidate_valid`、`facing_impact_rad`，均在执行动作前从视觉估计/控制状态复制。
-每步日志和回合累计分别记录基础切板、返回、朝向成本以及总成本；
-不使用机器人真值进行朝向评分。完整公式及启动命令见 running.md。
-
-
-### factorized_mlp 策略契约
-
-`policy_kind=factorized_mlp` 仅适用于 joint，保持 Gym Discrete(9) 和 v2/v3 输入契约。
-共享策略主干使用 `ppo.net_arch.pi`（默认 128/128 Tanh）；选板头输出 HOLD 和四槽位。
-条件开火头共享于四槽位，输入主干特征、该槽位当前候选特征、8 帧射击状态与当前时钟/
-射击掩码，64 单元隐藏层后输出每槽位一个 Bernoulli logit。
-所有 `referee.*`、`referee_age_*`、`since_request_*` 特征及 decision_clock、射击掩码
-从选板主干排除；跟踪掩码、有效历史标志和 selection_memory 保留。
-独立 critic 使用 `ppo.net_arch.vf` 和完整观测。
-
-`P(0)=alpha[0]`，`P(1+2i)=alpha[i+1]*(1-beta[i])`，
-`P(2+2i)=alpha[i+1]*beta[i]`。禁射令对应 beta=0，不改变 alpha。
-禁止出现射击合法而同板跟踪非法的掩码；无合法候选时 HOLD 保持可用。
-采样按 alpha 再按所选槽位 beta，确定性执行按 alpha argmax 再 beta>0.5，
-平局选择不开火，绝不对九项联合概率取全局 argmax。
-HOLD 不发起新射击，重复显式选择当前槽位可以射击且不算切板。
-联合 log_prob 与熵 `H(alpha)+sum(alpha[i+1]*H(beta[i]))` 用于 PPO。
-
-新检查点额外保存 version=1 的 policy_contract，包含输入路由、条件头宽度和确定性
-解码语义。缺失/不匹配或策略类与 policy_kind 不一致时拒绝加载；旧 mlp 检查点元数据
-不添加该字段，原指纹保持不变。诊断中的 distribution.probs 仍为九动作联合概率，
-开火概率为四个射击动作概率之和；确定性动作必须调用 distribution.mode/predict。
-
-### shared_score_mlp 策略契约
-
-`policy_kind=shared_score_mlp` 仅适用于 joint，保持相同的 v2/v3 观测和九动作协议。
-全局主干排除候选特征、四个槽位的 previous_slot 历史和原始槽位记忆；每个候选的历史、
-候选相关 previous_slot、return_slot 标志和跟踪掩码送入同一个候选编码器。四个编码结果
-经过掩码平均得到排列无关的候选摘要，再由同一个评分头输出四个选板分数；HOLD 使用独立
-的全局分数。条件开火头仍与 `factorized_mlp` 相同并共享四槽位参数。
-
-共享评分只改变策略结构，不要求四个槽位均匀选择，也不包含切换滞回。候选排列时，评分和
-动作应随候选一起移动；无效候选仍由动作掩码排除。该策略必须从头训练，检查点契约会拒绝
-与 `mlp` 或 `factorized_mlp` 互相加载。
+`replay.json` 当前 `version=1`：头部包含 `model`、`fingerprints`、`render` 路径、`scene_seed`、
+`reset_attempts` 和 `scenario`；`frames` 保存每个 10 ms 周期的 `time_ns`、`phase`、`metrics`、
+真实姿态与事件 `data`，`summary` 保存原始伤害与最终 `WindowScore`。不推进时间的关窗事件
+合并进同时间戳的末帧，不重复记录物理周期。真值仅供计分与显示，不进入模型观测。
+`settlement_timed_out` 的回放可查看已有过程，但 `official_damage=null`，不能解释为完整得分。
